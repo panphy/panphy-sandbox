@@ -8,6 +8,10 @@ import json
 import re
 import numpy as np
 
+# New: database + dashboard
+import pandas as pd
+from sqlalchemy import create_engine, text
+
 # --- PAGE CONFIG ---
 st.set_page_config(
     page_title="AI Physics Examiner",
@@ -32,6 +36,114 @@ try:
 except Exception:
     st.error("⚠️ OpenAI API Key missing or invalid in Streamlit Secrets!")
     AI_READY = False
+
+# --- DATABASE (SUPABASE POSTGRES) ---
+# Secrets required:
+#   DATABASE_URL = "postgresql://..."
+# Optional:
+#   TEACHER_PASSWORD = "..."
+@st.cache_resource
+def get_db_engine():
+    db_url = st.secrets.get("DATABASE_URL", "").strip()
+    if not db_url:
+        return None
+    # pool_pre_ping helps survive idle disconnects
+    return create_engine(db_url, pool_pre_ping=True)
+
+def db_ready() -> bool:
+    return get_db_engine() is not None
+
+def ensure_attempts_table():
+    """Creates attempts table if it does not exist (safe to call repeatedly)."""
+    eng = get_db_engine()
+    if eng is None:
+        return
+    ddl = """
+    create table if not exists public.attempts (
+      id uuid primary key default gen_random_uuid(),
+      created_at timestamptz not null default now(),
+
+      student_id text not null,
+      question_key text not null,
+      mode text not null check (mode in ('text', 'drawing')),
+
+      marks_awarded int not null check (marks_awarded >= 0),
+      max_marks int not null check (max_marks > 0),
+
+      summary text,
+      feedback_points jsonb,
+      next_steps jsonb
+    );
+
+    create index if not exists attempts_student_idx on public.attempts (student_id);
+    create index if not exists attempts_created_idx on public.attempts (created_at desc);
+    create index if not exists attempts_question_idx on public.attempts (question_key);
+    """
+    try:
+        with eng.begin() as conn:
+            conn.execute(text(ddl))
+    except Exception:
+        # Do not crash student UI if DB has issues
+        pass
+
+def insert_attempt(student_id: str, question_key: str, report: dict, mode: str):
+    """Appends one attempt row. Silent failure to avoid exposing internals to students."""
+    eng = get_db_engine()
+    if eng is None:
+        return
+
+    sid = (student_id or "").strip()
+    if not sid:
+        return  # require student_id for logging
+
+    try:
+        with eng.begin() as conn:
+            conn.execute(
+                text("""
+                    insert into public.attempts
+                    (student_id, question_key, mode, marks_awarded, max_marks, summary, feedback_points, next_steps)
+                    values
+                    (:student_id, :question_key, :mode, :marks_awarded, :max_marks, :summary,
+                     :feedback_points::jsonb, :next_steps::jsonb)
+                """),
+                dict(
+                    student_id=sid,
+                    question_key=question_key,
+                    mode=mode,
+                    marks_awarded=int(report.get("marks_awarded", 0)),
+                    max_marks=max(1, int(report.get("max_marks", 1))),
+                    summary=str(report.get("summary", ""))[:1000],
+                    feedback_points=json.dumps(report.get("feedback_points", [])[:6]),
+                    next_steps=json.dumps(report.get("next_steps", [])[:6]),
+                )
+            )
+    except Exception:
+        pass
+
+def load_attempts_df(limit: int = 5000) -> pd.DataFrame:
+    eng = get_db_engine()
+    if eng is None:
+        return pd.DataFrame()
+
+    try:
+        with eng.connect() as conn:
+            df = pd.read_sql(
+                text("""
+                    select created_at, student_id, question_key, mode, marks_awarded, max_marks
+                    from public.attempts
+                    order by created_at desc
+                    limit :limit
+                """),
+                conn,
+                params={"limit": int(limit)},
+            )
+        # normalize
+        if not df.empty:
+            df["marks_awarded"] = pd.to_numeric(df["marks_awarded"], errors="coerce").fillna(0).astype(int)
+            df["max_marks"] = pd.to_numeric(df["max_marks"], errors="coerce").fillna(0).astype(int)
+        return df
+    except Exception:
+        return pd.DataFrame()
 
 # --- SESSION STATE ---
 if "canvas_key" not in st.session_state:
@@ -59,12 +171,12 @@ def encode_image(image_pil: Image.Image) -> str:
     image_pil.save(buffered, format="PNG", optimize=True)
     return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
-def safe_parse_json(text: str):
+def safe_parse_json(text_str: str):
     try:
-        return json.loads(text)
+        return json.loads(text_str)
     except Exception:
         pass
-    m = re.search(r"\{.*\}", text, re.DOTALL)
+    m = re.search(r"\{.*\}", text_str, re.DOTALL)
     if m:
         try:
             return json.loads(m.group(0))
@@ -154,7 +266,7 @@ Max Marks: {max_marks}
         )
         raw = response.choices[0].message.content or ""
         data = safe_parse_json(raw)
-        
+
         if not data:
             raise ValueError("No valid JSON parsed.")
 
@@ -165,7 +277,7 @@ Max Marks: {max_marks}
             "feedback_points": [str(x) for x in data.get("feedback_points", [])][:6],
             "next_steps": [str(x) for x in data.get("next_steps", [])][:6]
         }
-    except Exception as e:
+    except Exception:
         return {
             "marks_awarded": 0,
             "max_marks": max_marks,
@@ -187,6 +299,10 @@ def render_report(report: dict):
         for n in report["next_steps"]:
             st.write(f"- {n}")
 
+# Optional: auto-create table if DB is configured
+if db_ready():
+    ensure_attempts_table()
+
 # --- MAIN APP UI ---
 
 # 1. Top Navigation Bar (Replaces Sidebar)
@@ -202,7 +318,7 @@ with top_col2:
     q_data = QUESTIONS[q_key]
 
 with top_col3:
-    # Clean visual spacer or status indicator
+    # Status indicator
     if AI_READY:
         st.success("System Online", icon="🟢")
     else:
@@ -211,14 +327,21 @@ with top_col3:
 st.divider()
 
 # 2. Main Content Area
-col1, col2 = st.columns([5, 4]) # Adjusted ratio for better canvas space
+col1, col2 = st.columns([5, 4])
 
 with col1:
     st.subheader("📝 The Question")
     st.markdown(f"**{q_data['question']}**")
     st.caption(f"Max Marks: {q_data['marks']}")
-    
-    st.write("") # Spacer
+
+    st.write("")
+
+    # Student identifier for logging (keeps UI simple, but enables dashboard)
+    student_id = st.text_input(
+        "Student ID",
+        placeholder="e.g. 10A_23",
+        help="Used to record your attempts for the teacher dashboard. Leave blank if not needed."
+    )
 
     # Input Method Tabs
     tab_type, tab_draw = st.tabs(["⌨️ Type Answer", "✍️ Draw Answer"])
@@ -231,6 +354,8 @@ with col1:
             else:
                 with st.spinner("Marking..."):
                     st.session_state["feedback"] = get_gpt_feedback(answer, q_data, is_image=False)
+                    # Log attempt (if DB configured and student_id provided)
+                    insert_attempt(student_id, q_key, st.session_state["feedback"], mode="text")
 
     with tab_draw:
         # Toolbar for canvas
@@ -251,7 +376,7 @@ with col1:
             stroke_color=stroke_color,
             background_color=CANVAS_BG_HEX,
             height=400,
-            width=600, # Increased width
+            width=600,
             drawing_mode="freedraw",
             key=f"canvas_{st.session_state['canvas_key']}",
         )
@@ -263,6 +388,8 @@ with col1:
                 with st.spinner("Analyzing diagram..."):
                     img_for_ai = preprocess_canvas_image(canvas_result.image_data)
                     st.session_state["feedback"] = get_gpt_feedback(img_for_ai, q_data, is_image=True)
+                    # Log attempt (if DB configured and student_id provided)
+                    insert_attempt(student_id, q_key, st.session_state["feedback"], mode="drawing")
 
 with col2:
     st.subheader("👨‍🏫 Report")
@@ -275,3 +402,46 @@ with col2:
                 st.rerun()
         else:
             st.info("Submit an answer to receive feedback.")
+
+    # --- TEACHER DASHBOARD (simple MVP) ---
+    st.write("")
+    st.subheader("🔒 Teacher Dashboard")
+
+    if not db_ready():
+        st.info("Database not configured. Add DATABASE_URL to Streamlit secrets to enable class analytics.")
+    else:
+        teacher_pw = st.text_input("Teacher password", type="password", help="Set TEACHER_PASSWORD in Streamlit secrets.")
+        if teacher_pw and teacher_pw == st.secrets.get("TEACHER_PASSWORD", ""):
+            with st.spinner("Loading class data..."):
+                df = load_attempts_df(limit=5000)
+
+            if df.empty:
+                st.info("No attempts logged yet.")
+            else:
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Total attempts", int(len(df)))
+                c2.metric("Unique students", int(df["student_id"].nunique()))
+                c3.metric("Topics attempted", int(df["question_key"].nunique()))
+
+                st.write("### By student (overall %)")
+                by_student = (
+                    df.groupby("student_id")[["marks_awarded", "max_marks"]]
+                    .sum()
+                    .assign(percent=lambda x: (100 * x["marks_awarded"] / x["max_marks"].replace(0, np.nan)).round(1))
+                    .sort_values("percent", ascending=False)
+                )
+                st.dataframe(by_student, use_container_width=True)
+
+                st.write("### By topic (average %)")
+                by_topic = (
+                    df.groupby("question_key")[["marks_awarded", "max_marks"]]
+                    .sum()
+                    .assign(percent=lambda x: (100 * x["marks_awarded"] / x["max_marks"].replace(0, np.nan)).round(1))
+                    .sort_values("percent", ascending=False)
+                )
+                st.dataframe(by_topic, use_container_width=True)
+
+                st.write("### Recent attempts")
+                st.dataframe(df.head(50), use_container_width=True)
+        else:
+            st.caption("Enter the teacher password to view analytics.")
