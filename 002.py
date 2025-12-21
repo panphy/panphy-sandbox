@@ -38,6 +38,8 @@ if "canvas_key" not in st.session_state:
     st.session_state["canvas_key"] = 0
 if "feedback" not in st.session_state:
     st.session_state["feedback"] = None
+if "last_q_key" not in st.session_state:
+    st.session_state["last_q_key"] = None
 
 # --- QUESTION BANK ---
 QUESTIONS = {
@@ -66,8 +68,8 @@ def safe_parse_json(text: str):
     except Exception:
         pass
 
-    # Fallback: extract the first {...} block
-    m = re.search(r"\{.*\}", text, re.DOTALL)
+    # Fallback: extract the first {...} block (non-greedy)
+    m = re.search(r"\{.*?\}", text, re.DOTALL)
     if m:
         try:
             return json.loads(m.group(0))
@@ -119,10 +121,70 @@ def preprocess_canvas_image(image_data: np.ndarray) -> Image.Image:
 
     # Optional downscale for payload size
     if img.width > MAX_IMAGE_WIDTH:
-        ratio = MAX_IMAGE_WIDTH / img.width
-        img = img.resize((MAX_IMAGE_WIDTH, int(img.height * ratio)))
+        ratio = MAX_IMAGE_WIDTH / float(img.width)
+        new_w = MAX_IMAGE_WIDTH
+        new_h = max(1, int(img.height * ratio))
+        try:
+            resample = Image.Resampling.LANCZOS  # Pillow >= 9
+        except Exception:
+            resample = Image.LANCZOS  # older Pillow
+        img = img.resize((new_w, new_h), resample=resample)
 
     return img
+
+def _report_schema_json(max_marks: int) -> dict:
+    # JSON Schema for strict structured output
+    return {
+        "type": "object",
+        "properties": {
+            "marks_awarded": {"type": "integer", "minimum": 0, "maximum": int(max_marks)},
+            "max_marks": {"type": "integer"},
+            "summary": {"type": "string"},
+            "feedback_points": {"type": "array", "items": {"type": "string"}},
+            "next_steps": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["marks_awarded", "max_marks", "summary", "feedback_points", "next_steps"],
+        "additionalProperties": False,
+    }
+
+def _call_openai_structured(input_messages: list, schema_name: str, schema: dict):
+    """
+    Preferred path: Responses API with Structured Outputs (json_schema).
+    Falls back to Chat Completions JSON mode if Responses API is unavailable.
+    """
+    # 1) Try Responses API with json_schema
+    try:
+        resp = client.responses.create(
+            model=MODEL_NAME,
+            input=input_messages,
+            max_output_tokens=800,
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": schema_name,
+                    "schema": schema,
+                    "strict": True,
+                }
+            },
+            temperature=0,
+            store=False,
+        )
+        raw = getattr(resp, "output_text", None) or ""
+        if raw.strip():
+            return raw
+    except Exception:
+        # Fall through to Chat Completions fallback
+        pass
+
+    # 2) Fallback: Chat Completions with JSON mode
+    resp2 = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=input_messages,
+        max_completion_tokens=800,
+        response_format={"type": "json_object"},
+        temperature=0,
+    )
+    return resp2.choices[0].message.content or ""
 
 def get_gpt_feedback(student_answer, q_data, is_image=False):
     """
@@ -137,7 +199,7 @@ def get_gpt_feedback(student_answer, q_data, is_image=False):
 
     Important:
     - Mark scheme is sent to the model but must never be revealed.
-    - We enforce JSON-only output and only render parsed fields.
+    - We enforce JSON output and only render parsed fields.
     """
     max_marks = q_data["marks"]
 
@@ -154,20 +216,14 @@ MARKING:
 - Award an integer mark from 0 to Max Marks.
 
 OUTPUT FORMAT (CRITICAL):
-- Output ONLY valid JSON, nothing else.
-- Schema:
-{{
-  "marks_awarded": <int>,
-  "max_marks": <int>,
-  "summary": "<1-2 sentences>",
-  "feedback_points": ["<bullet 1>", "<bullet 2>"],
-  "next_steps": ["<action 1>", "<action 2>"]
-}}
+- Output ONLY valid JSON matching the required schema.
+- Do not include any extra keys.
 
 Question: {q_data["question"]}
 Max Marks: {max_marks}
 """.strip()
 
+    # Build input for Responses API and also compatible with Chat Completions fallback
     messages = [{"role": "system", "content": system_instr}]
 
     # Put the confidential scheme in a separate system message
@@ -181,8 +237,8 @@ Max Marks: {max_marks}
         messages.append({
             "role": "user",
             "content": [
-                {"type": "text", "text": "Mark this work. Return JSON only."},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64_img}"}}
+                {"type": "input_text", "text": "Mark this work. Return JSON only."},
+                {"type": "input_image", "image_url": f"data:image/png;base64,{base64_img}"},
             ]
         })
     else:
@@ -191,17 +247,16 @@ Max Marks: {max_marks}
             "content": f"Student Answer:\n{student_answer}\n\nReturn JSON only."
         })
 
+    schema = _report_schema_json(max_marks)
+
     try:
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages,
-            max_completion_tokens=800,
-            reasoning_effort="minimal",
+        raw = _call_openai_structured(
+            input_messages=messages,
+            schema_name="gcse_physics_examiner_report",
+            schema=schema,
         )
 
-        raw = response.choices[0].message.content or ""
         data = safe_parse_json(raw)
-
         if not data:
             return {
                 "marks_awarded": 0,
@@ -214,6 +269,7 @@ Max Marks: {max_marks}
         # Defensive cleanup and clamping
         marks_awarded = clamp_int(data.get("marks_awarded", 0), 0, max_marks, default=0)
         summary = str(data.get("summary", "")).strip()
+
         feedback_points = data.get("feedback_points", [])
         next_steps = data.get("next_steps", [])
 
@@ -269,6 +325,14 @@ with st.sidebar:
     q_data = QUESTIONS[q_key]
     st.divider()
     st.caption("Using GPT-5-nano: fast, multimodal GCSE marking.")
+
+# Reset feedback/canvas when question changes (keeps behaviour sensible across questions)
+if st.session_state["last_q_key"] is None:
+    st.session_state["last_q_key"] = q_key
+elif st.session_state["last_q_key"] != q_key:
+    st.session_state["last_q_key"] = q_key
+    st.session_state["feedback"] = None
+    st.session_state["canvas_key"] += 1
 
 col1, col2 = st.columns([1, 1])
 
