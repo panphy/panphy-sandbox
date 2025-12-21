@@ -6,7 +6,7 @@ import io
 import base64
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="OpenAI Physics Examiner", page_icon="🚀", layout="wide")
+st.set_page_config(page_title="Physics Examiner: GPT-5-nano", page_icon="⚛️", layout="wide")
 
 # --- INITIALIZE OPENAI CLIENT ---
 try:
@@ -15,6 +15,10 @@ try:
 except Exception:
     st.error("⚠️ OpenAI API Key missing in Streamlit Secrets!")
     AI_READY = False
+
+# --- SESSION STATE FOR CANVAS RESET ---
+if "canvas_key" not in st.session_state:
+    st.session_state["canvas_key"] = 0
 
 # --- QUESTION BANK ---
 QUESTIONS = {
@@ -37,7 +41,8 @@ def encode_image(image_pil):
     return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
 def get_gpt_feedback(student_answer, q_data, is_image=False):
-    model_name = "gpt-5.2" 
+    # Using the cost-effective gpt-5-nano model
+    model_name = "gpt-5-nano" 
     system_instr = f"You are a strict GCSE Physics Examiner.\nQuestion: {q_data['question']}\nScheme: {q_data['mark_scheme']}\nMax Marks: {q_data['marks']}"
     messages = [{"role": "system", "content": system_instr}]
     
@@ -57,22 +62,21 @@ def get_gpt_feedback(student_answer, q_data, is_image=False):
         response = client.chat.completions.create(
             model=model_name,
             messages=messages,
-            max_completion_tokens=600 # Updated parameter for GPT-5.x series
+            max_completion_tokens=600 # Parameter required for GPT-5 series
         )
         return response.choices[0].message.content
     except Exception as e:
         return f"Examiner Error: {str(e)}"
 
 # --- APP UI ---
-st.title("🚀 OpenAI Examiner (GPT-5.2)")
+st.title("⚛️ AI Physics Examiner (GPT-5-nano)")
 
 with st.sidebar:
     st.header("Select Task")
     q_key = st.selectbox("Question Topic", list(QUESTIONS.keys()))
     q_data = QUESTIONS[q_key]
     st.divider()
-    st.markdown("### Examiner Tips")
-    st.caption("Show all working out to gain partial marks even if your final answer is wrong.")
+    st.caption("GPT-5-nano provides high-accuracy marking for text and visual inputs at a low cost.")
 
 # Layout
 col1, col2 = st.columns([1, 1])
@@ -81,28 +85,29 @@ with col1:
     st.subheader("📝 The Question")
     st.info(f"**{q_key}**\n\n{q_data['question']}\n\n*(Max Marks: {q_data['marks']})*")
     
-    # Mode Switcher
-    mode = st.radio("How will you answer?", ["⌨️ Type", "✍️ Handwriting/Drawing"], horizontal=True)
+    mode = st.radio("Answer Mode:", ["⌨️ Type", "✍️ Handwriting/Drawing"], horizontal=True)
 
     if mode == "⌨️ Type":
-        # TYPING MODE
-        answer = st.text_area("Type your working and final answer here:", height=250)
+        answer = st.text_area("Type your working and final answer:", height=250)
         if st.button("Submit Text Answer") and AI_READY:
-            with st.spinner("GPT-5.2 is marking..."):
+            with st.spinner("GPT-5-nano is marking..."):
                 st.session_state["feedback"] = get_gpt_feedback(answer, q_data)
     
     else:
-        # DRAWING MODE
         st.write("Draw/Write your working below:")
         
-        # Pen/Eraser Toggle
-        tool_col1, tool_col2 = st.columns([1, 4])
-        with tool_col1:
-            tool = st.radio("Tool:", ["🖊️ Pen", "🧼 Eraser"], label_visibility="collapsed")
+        # Drawing Toolbar
+        tool_col, clear_col = st.columns([2, 1])
+        with tool_col:
+            tool = st.radio("Tool:", ["🖊️ Pen", "🧼 Eraser"], label_visibility="collapsed", horizontal=True)
+        with clear_col:
+            if st.button("🗑️ Clear Canvas"):
+                st.session_state["canvas_key"] += 1 # Forces canvas to reset
+                st.rerun()
         
         # Tool Logic
-        current_stroke = "#000000" if tool == "🖊️ Pen" else "#f8f9fa" # Eraser matches BG color
-        stroke_width = 2 if tool == "🖊️ Pen" else 20 # Wider stroke for eraser
+        current_stroke = "#000000" if tool == "🖊️ Pen" else "#f8f9fa"
+        stroke_width = 2 if tool == "🖊️ Pen" else 25
         
         canvas_result = st_canvas(
             stroke_width=stroke_width,
@@ -111,14 +116,14 @@ with col1:
             height=350,
             width=550,
             drawing_mode="freedraw",
-            key="canvas_marking"
+            # Unique key allows for manual clearing
+            key=f"canvas_{st.session_state['canvas_key']}" 
         )
         
         if st.button("Submit Drawing") and AI_READY:
             if canvas_result.image_data is not None:
-                with st.spinner("Analyzing handwriting..."):
+                with st.spinner("Analyzing with GPT-5-nano..."):
                     raw_img = Image.fromarray(canvas_result.image_data.astype('uint8'))
-                    # Replace transparency with white background for AI vision clarity
                     white_bg = Image.new("RGB", raw_img.size, (255, 255, 255))
                     white_bg.paste(raw_img, mask=raw_img.split()[3]) 
                     st.session_state["feedback"] = get_gpt_feedback(white_bg, q_data, is_image=True)
@@ -129,8 +134,8 @@ with col2:
     st.subheader("👨‍🏫 Examiner's Report")
     if "feedback" in st.session_state:
         st.markdown(st.session_state["feedback"])
-        if st.button("Clear Report"):
+        if st.button("New Question"):
             del st.session_state["feedback"]
             st.rerun()
     else:
-        st.info("Your feedback will appear here once you submit an answer.")
+        st.info("Feedback will appear here after submission.")
