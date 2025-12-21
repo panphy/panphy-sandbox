@@ -1,7 +1,7 @@
 streamlit
 openai
 pandas
-sqlalchemy
 streamlit-drawable-canvas
-psycopg-binary
+psycopg[binary]
+SQLAlchemy>=2.0
 Pillow
