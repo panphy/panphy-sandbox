@@ -6,7 +6,7 @@ import io
 import base64
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Physics Examiner: GPT-5-nano", page_icon="⚛️", layout="wide")
+st.set_page_config(page_title="AI Physics Examiner (GPT-5-nano)", page_icon="⚛️", layout="wide")
 
 # --- INITIALIZE OPENAI CLIENT ---
 try:
@@ -41,9 +41,15 @@ def encode_image(image_pil):
     return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
 def get_gpt_feedback(student_answer, q_data, is_image=False):
-    # Using the cost-effective gpt-5-nano model
+    # Using GPT-5-nano for cost-efficiency
     model_name = "gpt-5-nano" 
-    system_instr = f"You are a strict GCSE Physics Examiner.\nQuestion: {q_data['question']}\nScheme: {q_data['mark_scheme']}\nMax Marks: {q_data['marks']}"
+    
+    system_instr = f"""You are a strict GCSE Physics Examiner. 
+    Mark strictly according to the mark scheme. 
+    Question: {q_data['question']}
+    Mark Scheme: {q_data['mark_scheme']}
+    Max Marks: {q_data['marks']}"""
+    
     messages = [{"role": "system", "content": system_instr}]
     
     if is_image:
@@ -51,7 +57,7 @@ def get_gpt_feedback(student_answer, q_data, is_image=False):
         messages.append({
             "role": "user",
             "content": [
-                {"type": "text", "text": "Mark this handwritten/drawn answer strictly."},
+                {"type": "text", "text": "Analyze this handwritten/drawn answer strictly against the mark scheme."},
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64_img}"}}
             ]
         })
@@ -59,55 +65,57 @@ def get_gpt_feedback(student_answer, q_data, is_image=False):
         messages.append({"role": "user", "content": f"Student Answer: {student_answer}"})
 
     try:
+        # GPT-5.x parameters
         response = client.chat.completions.create(
             model=model_name,
             messages=messages,
-            max_completion_tokens=600 # Parameter required for GPT-5 series
+            max_completion_tokens=4000, # Increased to prevent blank outputs from reasoning loops
+            reasoning_effort="minimal"  # Ensures the model gives a direct answer quickly
         )
-        return response.choices[0].message.content
+        content = response.choices[0].message.content
+        return content if content else "⚠️ [Empty Response] The model used its entire token budget on reasoning. Please try again with a simpler answer."
     except Exception as e:
         return f"Examiner Error: {str(e)}"
 
-# --- APP UI ---
+# --- MAIN APP UI ---
 st.title("⚛️ AI Physics Examiner (GPT-5-nano)")
 
 with st.sidebar:
-    st.header("Select Task")
+    st.header("Exam Settings")
     q_key = st.selectbox("Question Topic", list(QUESTIONS.keys()))
     q_data = QUESTIONS[q_key]
     st.divider()
-    st.caption("GPT-5-nano provides high-accuracy marking for text and visual inputs at a low cost.")
+    st.caption("Using GPT-5-nano: Optimized for fast, multimodal GCSE marking in December 2025.")
 
-# Layout
+# Layout: Two columns for side-by-side view
 col1, col2 = st.columns([1, 1])
 
 with col1:
     st.subheader("📝 The Question")
     st.info(f"**{q_key}**\n\n{q_data['question']}\n\n*(Max Marks: {q_data['marks']})*")
     
-    mode = st.radio("Answer Mode:", ["⌨️ Type", "✍️ Handwriting/Drawing"], horizontal=True)
+    # Mode Switcher
+    mode = st.radio("How will you answer?", ["⌨️ Type", "✍️ Handwriting/Drawing"], horizontal=True)
 
     if mode == "⌨️ Type":
-        answer = st.text_area("Type your working and final answer:", height=250)
+        answer = st.text_area("Type your working and final answer:", height=300)
         if st.button("Submit Text Answer") and AI_READY:
             with st.spinner("GPT-5-nano is marking..."):
                 st.session_state["feedback"] = get_gpt_feedback(answer, q_data)
     
     else:
-        st.write("Draw/Write your working below:")
-        
-        # Drawing Toolbar
+        # DRAWING MODE TOOLBAR
         tool_col, clear_col = st.columns([2, 1])
         with tool_col:
             tool = st.radio("Tool:", ["🖊️ Pen", "🧼 Eraser"], label_visibility="collapsed", horizontal=True)
         with clear_col:
-            if st.button("🗑️ Clear Canvas"):
-                st.session_state["canvas_key"] += 1 # Forces canvas to reset
+            if st.button("🗑️ Clear Drawing"):
+                st.session_state["canvas_key"] += 1 # Resets the canvas key to force a clean slate
                 st.rerun()
         
-        # Tool Logic
+        # Tool logic: Eraser matches background color
         current_stroke = "#000000" if tool == "🖊️ Pen" else "#f8f9fa"
-        stroke_width = 2 if tool == "🖊️ Pen" else 25
+        stroke_width = 2 if tool == "🖊️ Pen" else 30
         
         canvas_result = st_canvas(
             stroke_width=stroke_width,
@@ -116,14 +124,14 @@ with col1:
             height=350,
             width=550,
             drawing_mode="freedraw",
-            # Unique key allows for manual clearing
             key=f"canvas_{st.session_state['canvas_key']}" 
         )
         
         if st.button("Submit Drawing") and AI_READY:
             if canvas_result.image_data is not None:
-                with st.spinner("Analyzing with GPT-5-nano..."):
+                with st.spinner("Analyzing handwriting..."):
                     raw_img = Image.fromarray(canvas_result.image_data.astype('uint8'))
+                    # Replace transparency with white background for AI vision clarity
                     white_bg = Image.new("RGB", raw_img.size, (255, 255, 255))
                     white_bg.paste(raw_img, mask=raw_img.split()[3]) 
                     st.session_state["feedback"] = get_gpt_feedback(white_bg, q_data, is_image=True)
@@ -134,8 +142,8 @@ with col2:
     st.subheader("👨‍🏫 Examiner's Report")
     if "feedback" in st.session_state:
         st.markdown(st.session_state["feedback"])
-        if st.button("New Question"):
+        if st.button("Start New Attempt"):
             del st.session_state["feedback"]
             st.rerun()
     else:
-        st.info("Feedback will appear here after submission.")
+        st.info("Feedback will appear here once you submit an answer.")
