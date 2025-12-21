@@ -7,8 +7,6 @@ import base64
 import json
 import re
 import numpy as np
-
-# New: database + dashboard
 import pandas as pd
 from sqlalchemy import create_engine, text
 import secrets as pysecrets
@@ -21,7 +19,8 @@ st.set_page_config(
 )
 
 # --- CONSTANTS ---
-MODEL_NAME = "gpt-5-mini"
+# using gpt-4o-mini for speed/cost (replace with your specific model if needed)
+MODEL_NAME = "gpt-4o-mini" 
 CANVAS_BG_HEX = "#f8f9fa"
 CANVAS_BG_RGB = (248, 249, 250)
 MAX_IMAGE_WIDTH = 1024
@@ -43,8 +42,6 @@ if "canvas_key" not in st.session_state:
     st.session_state["canvas_key"] = 0
 if "feedback" not in st.session_state:
     st.session_state["feedback"] = None
-
-# New: stable anonymous id for logging when student_id is blank
 if "anon_id" not in st.session_state:
     st.session_state["anon_id"] = pysecrets.token_hex(4)
 if "db_last_error" not in st.session_state:
@@ -67,68 +64,67 @@ QUESTIONS = {
 }
 
 # =========================
-#  SUPABASE POSTGRES LAYER
+#  ROBUST DATABASE LAYER
 # =========================
-# Secrets you should set:
-#   DATABASE_URL = "postgresql://..." or "postgres://..." or "postgresql+psycopg://..."
-# Optional:
-#   TEACHER_PASSWORD = "..."
+
+def get_db_driver_type():
+    """Detects if psycopg (v3) or psycopg2 (v2) is installed."""
+    try:
+        import psycopg
+        return "psycopg"
+    except ImportError:
+        try:
+            import psycopg2
+            return "psycopg2"
+        except ImportError:
+            return None
 
 def _normalize_db_url(db_url: str) -> str:
-    """
-    Forces SQLAlchemy to use psycopg v3.
-    Accepts URLs copied from Supabase:
-      postgresql://...
-      postgres://...
-      postgresql+psycopg://...
-    Returns:
-      postgresql+psycopg://...
-    """
+    """Forces the URL to match the installed driver to prevent connection errors."""
     u = (db_url or "").strip()
     if not u:
         return ""
-
-    if u.startswith("postgresql+psycopg://"):
-        return u
-
+    
+    # Fix protocol prefix if strictly 'postgres://' (common in Supabase)
     if u.startswith("postgres://"):
-        u = "postgresql://" + u[len("postgres://"):]
-
-    if u.startswith("postgresql://"):
-        u = "postgresql+psycopg://" + u[len("postgresql://"):]
-
+        u = u.replace("postgres://", "postgresql://", 1)
+        
+    driver = get_db_driver_type()
+    
+    if driver == "psycopg":
+        # Force postgresql+psycopg://
+        if u.startswith("postgresql://") and "psycopg" not in u:
+            u = u.replace("postgresql://", "postgresql+psycopg://", 1)
+    elif driver == "psycopg2":
+        # Force postgresql+psycopg2://
+        if u.startswith("postgresql://") and "psycopg2" not in u:
+            u = u.replace("postgresql://", "postgresql+psycopg2://", 1)
+            
     return u
 
 @st.cache_resource
 def get_db_engine():
-    """
-    Returns a SQLAlchemy engine or None.
-    Never crashes the app if driver is missing or URL is invalid.
-    """
-    raw = st.secrets.get("DATABASE_URL", "")
-    url = _normalize_db_url(raw)
+    """Returns SQLAlchemy engine or None if config is missing."""
+    raw_url = st.secrets.get("DATABASE_URL", "")
+    url = _normalize_db_url(raw_url)
+    
     if not url:
         return None
-
-    # Ensure psycopg v3 exists
-    try:
-        import psycopg  # noqa: F401
-    except Exception:
+        
+    if not get_db_driver_type():
         return None
 
     try:
         return create_engine(url, pool_pre_ping=True)
-    except Exception:
+    except Exception as e:
+        st.write(f"DB Engine Error: {e}") # Visible only during dev
         return None
 
 def db_ready() -> bool:
     return get_db_engine() is not None
 
 def ensure_attempts_table():
-    """
-    Creates attempts table if it does not exist.
-    Uses bigserial id (no pgcrypto extension needed).
-    """
+    """Creates table 'physics_attempts_v1' if missing."""
     if st.session_state.get("db_table_ready", False):
         return
 
@@ -136,108 +132,100 @@ def ensure_attempts_table():
     if eng is None:
         return
 
+    # Using 'physics_attempts_v1' to ensure fresh schema
     ddl = """
-    create table if not exists public.attempts (
+    create table if not exists public.physics_attempts_v1 (
       id bigserial primary key,
       created_at timestamptz not null default now(),
-
       student_id text not null,
       question_key text not null,
-      mode text not null check (mode in ('text', 'drawing')),
-
-      marks_awarded int not null check (marks_awarded >= 0),
-      max_marks int not null check (max_marks > 0),
-
+      mode text not null,
+      marks_awarded int not null,
+      max_marks int not null,
       summary text,
       feedback_points jsonb,
       next_steps jsonb
     );
-
-    create index if not exists attempts_student_idx on public.attempts (student_id);
-    create index if not exists attempts_created_idx on public.attempts (created_at desc);
-    create index if not exists attempts_question_idx on public.attempts (question_key);
     """
-
     try:
         with eng.begin() as conn:
             conn.execute(text(ddl))
         st.session_state["db_last_error"] = ""
         st.session_state["db_table_ready"] = True
     except Exception as e:
-        st.session_state["db_last_error"] = f"ensure_attempts_table: {e}"
+        st.session_state["db_last_error"] = f"Table Creation Error: {e}"
         st.session_state["db_table_ready"] = False
 
 def insert_attempt(student_id: str, question_key: str, report: dict, mode: str):
-    """
-    Inserts one attempt row.
-    Logs even if student_id is blank (uses anon_<id>).
-    """
+    """Inserts a student attempt into the database."""
     eng = get_db_engine()
     if eng is None:
         return
 
     ensure_attempts_table()
-    if not st.session_state.get("db_table_ready", False):
-        return
-
+    
     sid = (student_id or "").strip()
     if not sid:
         sid = f"anon_{st.session_state['anon_id']}"
 
+    # Safely extract report data
+    m_awarded = int(report.get("marks_awarded", 0))
+    m_max = int(report.get("max_marks", 1))
+    summ = str(report.get("summary", ""))[:1000]
+    fb_json = json.dumps(report.get("feedback_points", [])[:6])
+    ns_json = json.dumps(report.get("next_steps", [])[:6])
+
+    query = """
+        insert into public.physics_attempts_v1
+        (student_id, question_key, mode, marks_awarded, max_marks, summary, feedback_points, next_steps)
+        values
+        (:student_id, :question_key, :mode, :marks_awarded, :max_marks, :summary, :feedback_points::jsonb, :next_steps::jsonb)
+    """
+
     try:
         with eng.begin() as conn:
-            conn.execute(
-                text("""
-                    insert into public.attempts
-                    (student_id, question_key, mode, marks_awarded, max_marks, summary, feedback_points, next_steps)
-                    values
-                    (:student_id, :question_key, :mode, :marks_awarded, :max_marks, :summary,
-                     :feedback_points::jsonb, :next_steps::jsonb)
-                """),
-                dict(
-                    student_id=sid,
-                    question_key=question_key,
-                    mode=mode,
-                    marks_awarded=int(report.get("marks_awarded", 0)),
-                    max_marks=max(1, int(report.get("max_marks", 1))),
-                    summary=str(report.get("summary", ""))[:1000],
-                    feedback_points=json.dumps(report.get("feedback_points", [])[:6]),
-                    next_steps=json.dumps(report.get("next_steps", [])[:6]),
-                )
-            )
-        st.session_state["db_last_error"] = ""
+            conn.execute(text(query), {
+                "student_id": sid,
+                "question_key": question_key,
+                "mode": mode,
+                "marks_awarded": m_awarded,
+                "max_marks": m_max,
+                "summary": summ,
+                "feedback_points": fb_json,
+                "next_steps": ns_json
+            })
+        st.session_state["db_last_error"] = None
     except Exception as e:
-        st.session_state["db_last_error"] = f"insert_attempt: {e}"
+        st.session_state["db_last_error"] = f"Insert Error: {e}"
 
 def load_attempts_df(limit: int = 5000) -> pd.DataFrame:
+    """Loads attempts for the dashboard."""
     eng = get_db_engine()
     if eng is None:
         return pd.DataFrame()
 
     ensure_attempts_table()
-    if not st.session_state.get("db_table_ready", False):
-        return pd.DataFrame()
 
     try:
         with eng.connect() as conn:
             df = pd.read_sql(
                 text("""
                     select created_at, student_id, question_key, mode, marks_awarded, max_marks
-                    from public.attempts
+                    from public.physics_attempts_v1
                     order by created_at desc
                     limit :limit
                 """),
                 conn,
                 params={"limit": int(limit)},
             )
-        st.session_state["db_last_error"] = ""
-
+        
         if not df.empty:
             df["marks_awarded"] = pd.to_numeric(df["marks_awarded"], errors="coerce").fillna(0).astype(int)
             df["max_marks"] = pd.to_numeric(df["max_marks"], errors="coerce").fillna(0).astype(int)
+        
         return df
     except Exception as e:
-        st.session_state["db_last_error"] = f"load_attempts_df: {e}"
+        st.session_state["db_last_error"] = f"Load Error: {e}"
         return pd.DataFrame()
 
 # --- HELPER FUNCTIONS ---
@@ -272,6 +260,7 @@ def canvas_has_ink(image_data: np.ndarray) -> bool:
     arr = image_data.astype(np.uint8)
     if arr.ndim != 3 or arr.shape[2] < 3:
         return False
+    # Check if there's any non-background color
     rgb = arr[:, :, :3]
     alpha = arr[:, :, 3] if arr.shape[2] >= 4 else np.full((arr.shape[0], arr.shape[1]), 255, dtype=np.uint8)
     bg = np.array(CANVAS_BG_RGB, dtype=np.uint8)
@@ -336,8 +325,7 @@ Max Marks: {max_marks}
         response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=messages,
-            max_completion_tokens=800,
-            reasoning_effort="minimal",
+            max_completion_tokens=800
         )
         raw = response.choices[0].message.content or ""
         data = safe_parse_json(raw)
@@ -356,7 +344,7 @@ Max Marks: {max_marks}
         return {
             "marks_awarded": 0,
             "max_marks": max_marks,
-            "summary": "Could not generate report.",
+            "summary": "Could not generate report (API or Parsing error).",
             "feedback_points": ["Please try submitting again."],
             "next_steps": []
         }
@@ -376,7 +364,7 @@ def render_report(report: dict):
 
 # --- MAIN APP UI ---
 
-# 1. Top Navigation Bar (Replaces Sidebar)
+# 1. Top Navigation
 top_col1, top_col2, top_col3 = st.columns([3, 2, 1])
 
 with top_col1:
@@ -395,7 +383,7 @@ with top_col3:
 
 st.divider()
 
-# 2. Main Content Area
+# 2. Main Content
 col1, col2 = st.columns([5, 4])
 
 with col1:
@@ -404,12 +392,11 @@ with col1:
     st.caption(f"Max Marks: {q_data['marks']}")
 
     st.write("")
-
-    # Keep your UI intact: Student ID is optional
+    
     student_id = st.text_input(
         "Student ID",
         placeholder="e.g. 10A_23",
-        help="Used to record attempts for the teacher dashboard. If left blank, attempts are logged as an anonymous session."
+        help="Optional. Leave blank to submit anonymously."
     )
 
     tab_type, tab_draw = st.tabs(["⌨️ Type Answer", "✍️ Draw Answer"])
@@ -470,24 +457,29 @@ with col2:
         else:
             st.info("Submit an answer to receive feedback.")
 
-    # --- TEACHER DASHBOARD (MVP) ---
+    # --- TEACHER DASHBOARD ---
     st.write("")
     st.subheader("🔒 Teacher Dashboard")
 
     if not st.secrets.get("DATABASE_URL", "").strip():
-        st.info("Database not configured. Add DATABASE_URL to Streamlit secrets to enable analytics.")
+        st.info("Database not configured in secrets.")
     elif not db_ready():
-        st.error("Database driver not ready. Ensure requirements.txt includes psycopg[binary] and redeploy.")
-        st.caption("Tip: DATABASE_URL can be copied from Supabase as postgresql://... and this app will convert it to psycopg automatically.")
+        st.error("Database Connection Failed. Check drivers and URL.")
+        # If there's a specific driver error, show it lightly
+        if not get_db_driver_type():
+            st.caption("No Postgres driver found. Add 'psycopg-binary' to requirements.txt")
     else:
-        teacher_pw = st.text_input("Teacher password", type="password", help="Set TEACHER_PASSWORD in Streamlit secrets.")
+        teacher_pw = st.text_input("Teacher password", type="password")
         if teacher_pw and teacher_pw == st.secrets.get("TEACHER_PASSWORD", ""):
             with st.spinner("Loading class data..."):
                 df = load_attempts_df(limit=5000)
 
-            # Show DB errors to teacher only
+            # --- ERROR VISIBILITY FOR TEACHER ---
             if st.session_state.get("db_last_error"):
-                st.warning(st.session_state["db_last_error"])
+                st.error(f"Database Error: {st.session_state['db_last_error']}")
+                if st.button("Clear Error"):
+                    st.session_state["db_last_error"] = ""
+                    st.rerun()
 
             if df.empty:
                 st.info("No attempts logged yet.")
@@ -498,6 +490,7 @@ with col2:
                 c3.metric("Topics attempted", int(df["question_key"].nunique()))
 
                 st.write("### By student (overall %)")
+                # Group by student to see average performance
                 by_student = (
                     df.groupby("student_id")[["marks_awarded", "max_marks"]]
                     .sum()
