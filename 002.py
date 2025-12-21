@@ -7,61 +7,31 @@ import base64
 import json
 import re
 import numpy as np
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-import pandas as pd
-from datetime import datetime
 
 # --- PAGE CONFIG ---
 st.set_page_config(
-    page_title="AI Physics Examiner + Cloud DB",
+    page_title="AI Physics Examiner",
     page_icon="⚛️",
     layout="wide"
 )
 
 # --- CONSTANTS ---
-MODEL_NAME = "gpt-5-mini"
+MODEL_NAME = "gpt-5-nano"
 CANVAS_BG_HEX = "#f8f9fa"
 CANVAS_BG_RGB = (248, 249, 250)
 MAX_IMAGE_WIDTH = 1024
 
-# --- SCOPE FOR GOOGLE SHEETS ---
-G_SCOPE = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
-]
-
-# --- SETUP CLIENTS ---
+# --- OPENAI CLIENT (CACHED) ---
 @st.cache_resource
-def get_openai_client():
-    try:
-        return OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-    except Exception:
-        return None
+def get_client():
+    return OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-@st.cache_resource
-def get_google_sheet():
-    """Connects to Google Sheets using st.secrets."""
-    if "gcp_service_account" not in st.secrets:
-        return None
-    
-    try:
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(
-            dict(st.secrets["gcp_service_account"]), G_SCOPE
-        )
-        client = gspread.authorize(creds)
-        # Ensure you created a sheet named "Student Marks" in your Drive
-        sheet = client.open("Student Marks").sheet1 
-        return sheet
-    except Exception as e:
-        st.error(f"DB Connection Error: {e}")
-        return None
-
-client = get_openai_client()
-sheet_conn = get_google_sheet()
-
-AI_READY = client is not None
-DB_READY = sheet_conn is not None
+try:
+    client = get_client()
+    AI_READY = True
+except Exception:
+    st.error("⚠️ OpenAI API Key missing or invalid in Streamlit Secrets!")
+    AI_READY = False
 
 # --- SESSION STATE ---
 if "canvas_key" not in st.session_state:
@@ -110,9 +80,11 @@ def clamp_int(value, lo, hi, default=0):
     return max(lo, min(hi, v))
 
 def canvas_has_ink(image_data: np.ndarray) -> bool:
-    if image_data is None: return False
+    if image_data is None:
+        return False
     arr = image_data.astype(np.uint8)
-    if arr.ndim != 3 or arr.shape[2] < 3: return False
+    if arr.ndim != 3 or arr.shape[2] < 3:
+        return False
     rgb = arr[:, :, :3]
     alpha = arr[:, :, 3] if arr.shape[2] >= 4 else np.full((arr.shape[0], arr.shape[1]), 255, dtype=np.uint8)
     bg = np.array(CANVAS_BG_RGB, dtype=np.uint8)
@@ -133,34 +105,19 @@ def preprocess_canvas_image(image_data: np.ndarray) -> Image.Image:
         img = img.resize((MAX_IMAGE_WIDTH, int(img.height * ratio)))
     return img
 
-def log_to_sheet(name, topic, marks, max_marks, summary):
-    """Writes data to Google Sheet."""
-    if not DB_READY:
-        st.error("Database not connected. Check secrets.")
-        return False
-    
-    try:
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        # Ensure your Google Sheet columns match this order:
-        # Timestamp | Name | Topic | Marks | Max | Summary
-        sheet_conn.append_row([timestamp, name, topic, marks, max_marks, summary])
-        return True
-    except Exception as e:
-        st.error(f"Failed to save: {e}")
-        return False
-
 def get_gpt_feedback(student_answer, q_data, is_image=False):
     max_marks = q_data["marks"]
     system_instr = f"""
 You are a strict GCSE Physics examiner.
-CONFIDENTIALITY: Do NOT reveal the mark scheme.
-OUTPUT: JSON only.
+CONFIDENTIALITY RULE (CRITICAL):
+- The mark scheme is confidential. Do NOT reveal it, quote it, or paraphrase it.
+- Output ONLY valid JSON, nothing else.
 Schema:
 {{
   "marks_awarded": <int>,
   "max_marks": <int>,
   "summary": "<1-2 sentences>",
-  "feedback_points": ["<point 1>", "<point 2>"],
+  "feedback_points": ["<bullet 1>", "<bullet 2>"],
   "next_steps": ["<action 1>", "<action 2>"]
 }}
 Question: {q_data["question"]}
@@ -168,160 +125,153 @@ Max Marks: {max_marks}
 """.strip()
 
     messages = [{"role": "system", "content": system_instr}]
-    messages.append({"role": "system", "content": f"MARK SCHEME: {q_data['mark_scheme']}"})
+    messages.append({
+        "role": "system",
+        "content": f"CONFIDENTIAL MARKING SCHEME (DO NOT REVEAL): {q_data['mark_scheme']}"
+    })
 
     if is_image:
         base64_img = encode_image(student_answer)
         messages.append({
             "role": "user",
             "content": [
-                {"type": "text", "text": "Mark this. JSON only."},
+                {"type": "text", "text": "Mark this work. Return JSON only."},
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64_img}"}}
             ]
         })
     else:
-        messages.append({"role": "user", "content": f"Answer:\n{student_answer}\nJSON only."})
+        messages.append({
+            "role": "user",
+            "content": f"Student Answer:\n{student_answer}\n\nReturn JSON only."
+        })
 
     try:
         response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=messages,
             max_completion_tokens=800,
-            reasoning_effort="minimal"
+            reasoning_effort="minimal",
         )
-        data = safe_parse_json(response.choices[0].message.content or "")
-        if not data: raise ValueError("Invalid JSON")
+        raw = response.choices[0].message.content or ""
+        data = safe_parse_json(raw)
+        
+        if not data:
+            raise ValueError("No valid JSON parsed.")
 
         return {
             "marks_awarded": clamp_int(data.get("marks_awarded", 0), 0, max_marks),
             "max_marks": max_marks,
             "summary": str(data.get("summary", "")).strip(),
-            "feedback_points": data.get("feedback_points", [])[:4],
-            "next_steps": data.get("next_steps", [])[:3]
+            "feedback_points": [str(x) for x in data.get("feedback_points", [])][:6],
+            "next_steps": [str(x) for x in data.get("next_steps", [])][:6]
         }
     except Exception as e:
-        return {"marks_awarded": 0, "max_marks": max_marks, "summary": f"Error: {e}", "feedback_points": [], "next_steps": []}
+        return {
+            "marks_awarded": 0,
+            "max_marks": max_marks,
+            "summary": "Could not generate report.",
+            "feedback_points": ["Please try submitting again."],
+            "next_steps": []
+        }
 
 def render_report(report: dict):
     st.markdown(f"**Marks:** {report.get('marks_awarded', 0)} / {report.get('max_marks', 0)}")
-    st.info(report.get('summary', ''))
+    if report.get("summary"):
+        st.markdown(f"**Summary:** {report.get('summary')}")
     if report.get("feedback_points"):
-        st.write("**Feedback:**")
-        for p in report["feedback_points"]: st.write(f"- {p}")
+        st.markdown("**Feedback:**")
+        for p in report["feedback_points"]:
+            st.write(f"- {p}")
     if report.get("next_steps"):
-        st.write("**Next Steps:**")
-        for n in report["next_steps"]: st.write(f"- {n}")
+        st.markdown("**Next steps:**")
+        for n in report["next_steps"]:
+            st.write(f"- {n}")
 
 # --- MAIN APP UI ---
 
-# 1. Top Navigation
+# 1. Top Navigation Bar (Replaces Sidebar)
 top_col1, top_col2, top_col3 = st.columns([3, 2, 1])
+
 with top_col1:
     st.title("⚛️ AI Examiner")
-    st.caption("Multimodal Grading & Tracking")
+    st.caption(f"Powered by {MODEL_NAME}")
+
 with top_col2:
+    # Selector moved to top
     q_key = st.selectbox("Select Topic:", list(QUESTIONS.keys()))
     q_data = QUESTIONS[q_key]
+
 with top_col3:
-    status_color = "🟢" if (AI_READY and DB_READY) else "🟠" if AI_READY else "🔴"
-    st.markdown(f"**System Status:** {status_color}")
-    if not DB_READY:
-        st.caption("Cloud DB Offline")
+    # Clean visual spacer or status indicator
+    if AI_READY:
+        st.success("System Online", icon="🟢")
+    else:
+        st.error("API Error", icon="🔴")
 
 st.divider()
 
-# 2. Workspace
-col1, col2 = st.columns([5, 4])
+# 2. Main Content Area
+col1, col2 = st.columns([5, 4]) # Adjusted ratio for better canvas space
 
 with col1:
     st.subheader("📝 The Question")
     st.markdown(f"**{q_data['question']}**")
     st.caption(f"Max Marks: {q_data['marks']}")
     
+    st.write("") # Spacer
+
+    # Input Method Tabs
     tab_type, tab_draw = st.tabs(["⌨️ Type Answer", "✍️ Draw Answer"])
 
     with tab_type:
-        answer = st.text_area("Your Answer:", height=200)
+        answer = st.text_area("Type your working:", height=200, placeholder="Enter your answer here...")
         if st.button("Submit Text", type="primary", disabled=not AI_READY):
-            if not answer.strip(): st.toast("Type something first!")
+            if not answer.strip():
+                st.toast("Please type an answer first.", icon="⚠️")
             else:
                 with st.spinner("Marking..."):
-                    st.session_state["feedback"] = get_gpt_feedback(answer, q_data)
+                    st.session_state["feedback"] = get_gpt_feedback(answer, q_data, is_image=False)
 
     with tab_draw:
-        tool = st.radio("Tool", ["Pen", "Eraser"], horizontal=True, label_visibility="collapsed")
-        stroke = "#000000" if tool == "Pen" else CANVAS_BG_HEX
-        width = 2 if tool == "Pen" else 20
-        
-        canvas_res = st_canvas(
-            stroke_width=width, stroke_color=stroke, background_color=CANVAS_BG_HEX,
-            height=400, width=600, drawing_mode="freedraw", key=f"cv_{st.session_state['canvas_key']}"
+        # Toolbar for canvas
+        tool_c1, tool_c2, tool_c3 = st.columns([2, 2, 3])
+        with tool_c1:
+            tool = st.radio("Tool", ["Pen", "Eraser"], horizontal=True, label_visibility="collapsed")
+        with tool_c3:
+            if st.button("🗑️ Clear Canvas"):
+                st.session_state["canvas_key"] += 1
+                st.session_state["feedback"] = None
+                st.rerun()
+
+        stroke_width = 2 if tool == "Pen" else 30
+        stroke_color = "#000000" if tool == "Pen" else CANVAS_BG_HEX
+
+        canvas_result = st_canvas(
+            stroke_width=stroke_width,
+            stroke_color=stroke_color,
+            background_color=CANVAS_BG_HEX,
+            height=400,
+            width=600, # Increased width
+            drawing_mode="freedraw",
+            key=f"canvas_{st.session_state['canvas_key']}",
         )
+
         if st.button("Submit Drawing", type="primary", disabled=not AI_READY):
-            if not canvas_has_ink(canvas_res.image_data): st.toast("Canvas is empty!")
+            if canvas_result.image_data is None or not canvas_has_ink(canvas_result.image_data):
+                st.toast("Canvas is empty!", icon="⚠️")
             else:
-                with st.spinner("Analyzing Diagram..."):
-                    img = preprocess_canvas_image(canvas_res.image_data)
-                    st.session_state["feedback"] = get_gpt_feedback(img, q_data, True)
-        
-        if st.button("Clear Canvas"):
-            st.session_state["canvas_key"] += 1
-            st.session_state["feedback"] = None
-            st.rerun()
+                with st.spinner("Analyzing diagram..."):
+                    img_for_ai = preprocess_canvas_image(canvas_result.image_data)
+                    st.session_state["feedback"] = get_gpt_feedback(img_for_ai, q_data, is_image=True)
 
 with col2:
-    st.subheader("👨‍🏫 Result Card")
-    
+    st.subheader("👨‍🏫 Report")
     with st.container(border=True):
         if st.session_state["feedback"]:
             render_report(st.session_state["feedback"])
-            
             st.divider()
-            
-            # --- SAVE TO CLOUD FEATURE ---
-            st.markdown("#### ☁️ Save Progress")
-            student_name = st.text_input("Enter Name:", placeholder="e.g. John Doe")
-            
-            if st.button("💾 Save to Teacher Dashboard", disabled=not DB_READY):
-                if not student_name.strip():
-                    st.toast("Please enter your name first.", icon="⚠️")
-                else:
-                    with st.spinner("Syncing..."):
-                        success = log_to_sheet(
-                            student_name, 
-                            q_key, 
-                            st.session_state["feedback"]["marks_awarded"],
-                            st.session_state["feedback"]["max_marks"],
-                            st.session_state["feedback"]["summary"]
-                        )
-                        if success:
-                            st.success("Data saved successfully!")
-                            st.balloons()
+            if st.button("Start New Attempt", use_container_width=True):
+                st.session_state["feedback"] = None
+                st.rerun()
         else:
-            st.info("Submit an answer to see feedback.")
-
-# 3. Teacher Dashboard (Secure)
-st.markdown("<br><br><br>", unsafe_allow_html=True)
-with st.expander("🔐 Teacher Dashboard (Admin Access)"):
-    pwd = st.text_input("Admin Password", type="password")
-    admin_pass = st.secrets.get("admin", {}).get("password", "admin")
-    
-    if pwd == admin_pass:
-        if DB_READY:
-            st.write("### 📊 Live Student Performance")
-            try:
-                data = sheet_conn.get_all_records()
-                if data:
-                    df = pd.DataFrame(data)
-                    st.dataframe(df, use_container_width=True)
-                    
-                    # Mini Analytics
-                    if not df.empty and "Marks" in df.columns:
-                        st.subheader("Performance Overview")
-                        st.bar_chart(df.set_index("Name")["Marks"])
-                else:
-                    st.info("No data recorded yet.")
-            except Exception as e:
-                st.error(f"Error fetching data: {e}")
-        else:
-            st.warning("Database not connected.")
+            st.info("Submit an answer to receive feedback.")
