@@ -1,4 +1,4 @@
-i mport streamlit as st
+import streamlit as st
 from openai import OpenAI
 from streamlit_drawable_canvas import st_canvas
 from PIL import Image
