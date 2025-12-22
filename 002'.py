@@ -373,7 +373,7 @@ with tab_student:
 
         st.write("---")
         
-        # FIX: Replaced nested tabs with Radio Button to avoid StreamlitAPIException
+        # Use Radio to switch modes (nested tabs are not allowed inside columns)
         input_mode = st.radio(
             "How would you like to answer?",
             ["⌨️ Type Answer", "✍️ Draw Answer"],
@@ -392,14 +392,15 @@ with tab_student:
                             insert_attempt(student_id, q_key, st.session_state["feedback"], mode="text")
 
         else: # Draw Answer
-            tool_c1, tool_c2, tool_c3 = st.columns([2, 2, 3])
-            with tool_c1:
-                tool = st.radio("Tool", ["Pen", "Eraser"], horizontal=True, label_visibility="collapsed")
-            with tool_c3:
-                if st.button("🗑️ Clear Canvas"):
-                    st.session_state["canvas_key"] += 1
-                    st.session_state["feedback"] = None
-                    st.rerun()
+            # FIX: Removed nested columns (tool_c1, etc) which cause Streamlit errors.
+            # Using simple vertical layout for tools instead.
+            
+            tool = st.radio("Tool", ["Pen", "Eraser"], horizontal=True)
+            
+            if st.button("🗑️ Clear Canvas"):
+                st.session_state["canvas_key"] += 1
+                st.session_state["feedback"] = None
+                st.rerun()
 
             stroke_width = 2 if tool == "Pen" else 30
             stroke_color = "#000000" if tool == "Pen" else CANVAS_BG_HEX
