@@ -28,7 +28,7 @@ CANVAS_BG_HEX = "#f8f9fa"
 CANVAS_BG_RGB = (248, 249, 250)
 MAX_IMAGE_WIDTH = 1024
 
-STORAGE_BUCKET = "physics-bank"  # Supabase Storage bucket name
+STORAGE_BUCKET = "physics-bank"
 CUSTOM_QUESTION_PREFIX = "CUSTOM"
 
 # =========================
@@ -37,6 +37,7 @@ CUSTOM_QUESTION_PREFIX = "CUSTOM"
 @st.cache_resource
 def get_client():
     return OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+
 
 try:
     client = get_client()
@@ -66,6 +67,7 @@ def get_supabase_client():
     except Exception:
         return None
 
+
 def supabase_ready() -> bool:
     return get_supabase_client() is not None
 
@@ -84,6 +86,16 @@ if "db_table_ready" not in st.session_state:
     st.session_state["db_table_ready"] = False
 if "custom_table_ready" not in st.session_state:
     st.session_state["custom_table_ready"] = False
+
+# Canvas history for custom toolbar (undo/redo)
+if "canvas_hist" not in st.session_state:
+    st.session_state["canvas_hist"] = []
+if "canvas_future" not in st.session_state:
+    st.session_state["canvas_future"] = []
+if "canvas_last_json" not in st.session_state:
+    st.session_state["canvas_last_json"] = None
+if "canvas_initial" not in st.session_state:
+    st.session_state["canvas_initial"] = None
 
 # =========================
 # --- QUESTION BANK (BUILT-IN) ---
@@ -116,6 +128,7 @@ def get_db_driver_type():
         except ImportError:
             return None
 
+
 def _normalize_db_url(db_url: str) -> str:
     """Forces the URL to match the installed driver to prevent connection errors."""
     u = (db_url or "").strip()
@@ -136,6 +149,7 @@ def _normalize_db_url(db_url: str) -> str:
 
     return u
 
+
 @st.cache_resource
 def get_db_engine():
     raw_url = st.secrets.get("DATABASE_URL", "")
@@ -153,8 +167,10 @@ def get_db_engine():
         st.write(f"DB Engine Error: {e}")
         return None
 
+
 def db_ready() -> bool:
     return get_db_engine() is not None
+
 
 def ensure_attempts_table():
     """Creates table 'physics_attempts_v1' if missing."""
@@ -187,6 +203,7 @@ def ensure_attempts_table():
     except Exception as e:
         st.session_state["db_last_error"] = f"Table Creation Error: {e}"
         st.session_state["db_table_ready"] = False
+
 
 def insert_attempt(student_id: str, question_key: str, report: dict, mode: str):
     """Inserts a student attempt into the database."""
@@ -230,6 +247,7 @@ def insert_attempt(student_id: str, question_key: str, report: dict, mode: str):
     except Exception as e:
         st.session_state["db_last_error"] = f"Insert Error: {e}"
 
+
 def load_attempts_df(limit: int = 5000) -> pd.DataFrame:
     """Loads attempts for the dashboard."""
     eng = get_db_engine()
@@ -261,7 +279,7 @@ def load_attempts_df(limit: int = 5000) -> pd.DataFrame:
         return pd.DataFrame()
 
 # =========================
-#  CUSTOM QUESTION BANK TABLES (NEW)
+#  CUSTOM QUESTION BANK TABLES
 # =========================
 def ensure_custom_questions_table():
     if st.session_state.get("custom_table_ready", False):
@@ -295,6 +313,7 @@ def ensure_custom_questions_table():
     except Exception as e:
         st.session_state["db_last_error"] = f"Custom Table Creation Error: {e}"
         st.session_state["custom_table_ready"] = False
+
 
 def insert_custom_question(created_by: str,
                           assignment_name: str,
@@ -337,6 +356,7 @@ def insert_custom_question(created_by: str,
         st.session_state["db_last_error"] = f"Insert Custom Question Error: {e}"
         return False
 
+
 def load_custom_questions_df(limit: int = 2000) -> pd.DataFrame:
     eng = get_db_engine()
     if eng is None:
@@ -360,6 +380,7 @@ def load_custom_questions_df(limit: int = 2000) -> pd.DataFrame:
     except Exception as e:
         st.session_state["db_last_error"] = f"Load Custom Questions Error: {e}"
         return pd.DataFrame()
+
 
 def load_custom_question_by_id(qid: int) -> dict:
     eng = get_db_engine()
@@ -387,13 +408,14 @@ def load_custom_question_by_id(qid: int) -> dict:
         return {}
 
 # =========================
-# --- STORAGE HELPERS (NEW)
+# --- STORAGE HELPERS ---
 # =========================
 def slugify(s: str) -> str:
     s = (s or "").strip().lower()
     s = re.sub(r"[^a-z0-9]+", "-", s)
     s = re.sub(r"-{2,}", "-", s).strip("-")
     return s or "untitled"
+
 
 def upload_to_storage(path: str, file_bytes: bytes, content_type: str) -> bool:
     sb = get_supabase_client()
@@ -405,10 +427,12 @@ def upload_to_storage(path: str, file_bytes: bytes, content_type: str) -> bool:
         res = sb.storage.from_(STORAGE_BUCKET).upload(
             path,
             file_bytes,
-            {"content-type": content_type, "upsert": "true"}
+            {
+                "content-type": content_type,
+                "upsert": "true",  # must be string
+            }
         )
 
-        # Handle different response shapes across supabase-py versions
         err = None
         if hasattr(res, "error"):
             err = getattr(res, "error")
@@ -423,6 +447,7 @@ def upload_to_storage(path: str, file_bytes: bytes, content_type: str) -> bool:
         st.session_state["db_last_error"] = f"Storage Upload Error: {e}"
         return False
 
+
 def download_from_storage(path: str) -> bytes:
     sb = get_supabase_client()
     if sb is None:
@@ -435,15 +460,14 @@ def download_from_storage(path: str) -> bytes:
             return bytes(res)
 
         if hasattr(res, "data") and res.data is not None:
-            # some versions wrap bytes in .data
             if isinstance(res.data, (bytes, bytearray)):
                 return bytes(res.data)
 
-        # last resort
         return b""
     except Exception as e:
         st.session_state["db_last_error"] = f"Storage Download Error: {e}"
         return b""
+
 
 def bytes_to_pil(img_bytes: bytes) -> Image.Image:
     img = Image.open(io.BytesIO(img_bytes))
@@ -452,12 +476,13 @@ def bytes_to_pil(img_bytes: bytes) -> Image.Image:
     return img
 
 # =========================
-# --- HELPER FUNCTIONS (EXISTING) ---
+# --- HELPER FUNCTIONS ---
 # =========================
 def encode_image(image_pil: Image.Image) -> str:
     buffered = io.BytesIO()
     image_pil.save(buffered, format="PNG", optimize=True)
     return base64.b64encode(buffered.getvalue()).decode("utf-8")
+
 
 def safe_parse_json(text_str: str):
     try:
@@ -472,12 +497,14 @@ def safe_parse_json(text_str: str):
             return None
     return None
 
+
 def clamp_int(value, lo, hi, default=0):
     try:
         v = int(value)
     except Exception:
         v = default
     return max(lo, min(hi, v))
+
 
 def canvas_has_ink(image_data: np.ndarray) -> bool:
     if image_data is None:
@@ -492,6 +519,7 @@ def canvas_has_ink(image_data: np.ndarray) -> bool:
     ink = (diff > 60) & (alpha > 30)
     return (ink.mean() > 0.001)
 
+
 def preprocess_canvas_image(image_data: np.ndarray) -> Image.Image:
     raw_img = Image.fromarray(image_data.astype("uint8"))
     if raw_img.mode == "RGBA":
@@ -505,8 +533,47 @@ def preprocess_canvas_image(image_data: np.ndarray) -> Image.Image:
         img = img.resize((MAX_IMAGE_WIDTH, int(img.height * ratio)))
     return img
 
+
+def _apply_canvas_state(new_json):
+    st.session_state["canvas_initial"] = new_json
+    st.session_state["canvas_key"] += 1
+    st.rerun()
+
+
+def _track_canvas_history(cur_json):
+    if cur_json is None:
+        return
+
+    try:
+        cur_json_str = json.dumps(cur_json, sort_keys=True)
+    except Exception:
+        return
+
+    last = st.session_state.get("canvas_last_json", None)
+    if last is None:
+        st.session_state["canvas_last_json"] = cur_json
+        return
+
+    try:
+        last_str = json.dumps(last, sort_keys=True)
+    except Exception:
+        st.session_state["canvas_last_json"] = cur_json
+        return
+
+    if cur_json_str != last_str:
+        st.session_state["canvas_hist"].append(last)
+        st.session_state["canvas_future"] = []
+        st.session_state["canvas_last_json"] = cur_json
+
+
+def _clear_canvas_history():
+    st.session_state["canvas_hist"] = []
+    st.session_state["canvas_future"] = []
+    st.session_state["canvas_last_json"] = None
+    st.session_state["canvas_initial"] = None
+
 # =========================
-# --- EXISTING MARKING (BUILT-IN) ---
+# --- MARKING (BUILT-IN) ---
 # =========================
 def get_gpt_feedback(student_answer, q_data, is_image=False):
     max_marks = q_data["marks"]
@@ -584,7 +651,7 @@ Max Marks: {max_marks}
         }
 
 # =========================
-# --- NEW MARKING (CUSTOM QUESTION IMAGES) ---
+# --- MARKING (CUSTOM QUESTION IMAGES) ---
 # =========================
 def get_gpt_feedback_custom(student_answer,
                             question_img: Image.Image,
@@ -662,6 +729,7 @@ Max Marks: {int(max_marks)}
             "next_steps": []
         }
 
+
 def render_report(report: dict):
     st.markdown(f"**Marks:** {report.get('marks_awarded', 0)} / {report.get('max_marks', 0)}")
     if report.get("summary"):
@@ -706,7 +774,6 @@ with tab_student:
 
     col1, col2 = st.columns([5, 4])
 
-    # Determine selected question data
     selected_is_custom = (source == "Teacher Uploads")
     custom_row = {}
     q_key = None
@@ -730,6 +797,7 @@ with tab_student:
             st.caption(f"Max Marks: {q_data['marks']}")
             max_marks = q_data["marks"]
         else:
+            ensure_custom_questions_table()
             dfq = load_custom_questions_df(limit=2000)
             if dfq.empty:
                 st.info("No teacher-uploaded questions yet.")
@@ -757,7 +825,6 @@ with tab_student:
                     q_key = f"{CUSTOM_QUESTION_PREFIX}:{int(custom_row['id'])}:{custom_row.get('assignment_name','')}:{custom_row.get('question_label','')}"
                     qtext = (custom_row.get("question_text") or "").strip()
 
-                    # Display question image
                     q_bytes = download_from_storage(custom_row["question_image_path"])
                     if q_bytes:
                         question_img = bytes_to_pil(q_bytes)
@@ -773,8 +840,11 @@ with tab_student:
 
         st.write("")
 
-        tab_type, tab_draw = st.tabs(["⌨️ Type Answer", "✍️ Write Answer"])
+        tab_type, tab_write = st.tabs(["⌨️ Type Answer", "✍️ Write Answer"])
 
+        # -------------------------
+        # Type Answer
+        # -------------------------
         with tab_type:
             answer = st.text_area("Type your working:", height=200, placeholder="Enter your answer here...")
 
@@ -817,15 +887,41 @@ with tab_student:
                         if db_ready() and q_key:
                             insert_attempt(student_id, q_key, st.session_state["feedback"], mode="text")
 
-        with tab_draw:
-            tool_c1, tool_c2, tool_c3 = st.columns([2, 2, 3])
-            with tool_c1:
+        # -------------------------
+        # Write Answer (Canvas) with custom toolbar (dark mode friendly)
+        # -------------------------
+        with tab_write:
+            tool_row = st.columns([2, 1, 1, 1])
+            with tool_row[0]:
                 tool = st.radio("Tool", ["Pen", "Eraser"], horizontal=True, label_visibility="collapsed")
-            with tool_c3:
-                if st.button("🗑️ Clear Canvas"):
-                    st.session_state["canvas_key"] += 1
-                    st.session_state["feedback"] = None
-                    st.rerun()
+
+            undo_disabled = (len(st.session_state["canvas_hist"]) == 0)
+            redo_disabled = (len(st.session_state["canvas_future"]) == 0)
+
+            undo_clicked = tool_row[1].button("↶ Undo", use_container_width=True, disabled=undo_disabled)
+            redo_clicked = tool_row[2].button("↷ Redo", use_container_width=True, disabled=redo_disabled)
+            clear_clicked = tool_row[3].button("🗑️ Clear", use_container_width=True)
+
+            if undo_clicked:
+                cur = st.session_state["canvas_last_json"]
+                if cur is not None:
+                    st.session_state["canvas_future"].append(cur)
+                prev = st.session_state["canvas_hist"].pop()
+                st.session_state["canvas_last_json"] = prev
+                _apply_canvas_state(prev)
+
+            if redo_clicked:
+                cur = st.session_state["canvas_last_json"]
+                if cur is not None:
+                    st.session_state["canvas_hist"].append(cur)
+                nxt = st.session_state["canvas_future"].pop()
+                st.session_state["canvas_last_json"] = nxt
+                _apply_canvas_state(nxt)
+
+            if clear_clicked:
+                _clear_canvas_history()
+                st.session_state["feedback"] = None
+                _apply_canvas_state(None)
 
             stroke_width = 2 if tool == "Pen" else 30
             stroke_color = "#000000" if tool == "Pen" else CANVAS_BG_HEX
@@ -838,13 +934,34 @@ with tab_student:
                 width=600,
                 drawing_mode="freedraw",
                 key=f"canvas_{st.session_state['canvas_key']}",
+                display_toolbar=False,
+                update_streamlit=True,
+                initial_drawing=st.session_state["canvas_initial"],
+            )
+
+            _track_canvas_history(canvas_result.json_data)
+
+            png_bytes = None
+            if canvas_result.image_data is not None:
+                img = Image.fromarray(canvas_result.image_data.astype("uint8"))
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                png_bytes = buf.getvalue()
+
+            st.download_button(
+                "⬇️ Download Writing",
+                data=png_bytes if png_bytes else b"",
+                file_name="writing.png",
+                mime="image/png",
+                use_container_width=True,
+                disabled=(png_bytes is None),
             )
 
             if st.button("Submit Writing", type="primary", disabled=not AI_READY):
                 if canvas_result.image_data is None or not canvas_has_ink(canvas_result.image_data):
                     st.toast("Canvas is empty!", icon="⚠️")
                 else:
-                    with st.spinner("Analyzing diagram..."):
+                    with st.spinner("Analyzing..."):
                         img_for_ai = preprocess_canvas_image(canvas_result.image_data)
 
                         if not selected_is_custom:
@@ -894,7 +1011,7 @@ with tab_student:
                 st.info("Submit an answer to receive feedback.")
 
 # -------------------------
-# TEACHER DASHBOARD TAB (UNCHANGED)
+# TEACHER DASHBOARD TAB
 # -------------------------
 with tab_teacher:
     st.subheader("🔒 Teacher Dashboard")
@@ -904,7 +1021,7 @@ with tab_teacher:
     elif not db_ready():
         st.error("Database Connection Failed. Check drivers and URL.")
         if not get_db_driver_type():
-            st.caption("No Postgres driver found. Add 'psycopg-binary' to requirements.txt")
+            st.caption("No Postgres driver found. Add 'psycopg[binary]' (or psycopg2-binary) to requirements.txt")
     else:
         teacher_pw = st.text_input("Teacher password", type="password")
         if teacher_pw and teacher_pw == st.secrets.get("TEACHER_PASSWORD", ""):
@@ -949,7 +1066,7 @@ with tab_teacher:
             st.caption("Enter the teacher password to view analytics.")
 
 # -------------------------
-# QUESTION BANK TAB (NEW)
+# QUESTION BANK TAB
 # -------------------------
 with tab_bank:
     st.subheader("📚 Question Bank (Upload one question at a time)")
@@ -993,7 +1110,6 @@ with tab_bank:
                     qlabel_slug = slugify(question_label)
                     token = pysecrets.token_hex(6)
 
-                    # Read bytes and detect content-type
                     q_bytes = q_file.getvalue()
                     ms_bytes = ms_file.getvalue()
 
@@ -1026,7 +1142,7 @@ with tab_bank:
                             q_path=q_path,
                             ms_path=ms_path,
                             question_text=q_text_opt or "",
-                            markscheme_text=""  # keep blank for now (confidential)
+                            markscheme_text=""
                         )
                         if ok_db:
                             st.success("Saved. This question is now available under 'Teacher Uploads' in the Student tab.")
@@ -1035,7 +1151,6 @@ with tab_bank:
                     else:
                         st.error("Failed to upload one or both images to Supabase Storage. Check errors below.")
 
-            # Recent uploads preview
             st.write("")
             st.write("### Recent uploaded questions")
             df_bank = load_custom_questions_df(limit=50)
@@ -1044,7 +1159,6 @@ with tab_bank:
             else:
                 st.dataframe(df_bank, use_container_width=True)
 
-            # Error visibility
             if st.session_state.get("db_last_error"):
                 st.error(f"Error: {st.session_state['db_last_error']}")
                 if st.button("Clear Error", key="clear_bank_err"):
