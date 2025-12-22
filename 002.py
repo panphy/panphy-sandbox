@@ -861,7 +861,7 @@ with tab_student:
                 drawing_mode="freedraw",
                 key=f"canvas_{st.session_state['canvas_key']}",
                 display_toolbar=False,
-                update_streamlit=False,
+                update_streamlit=True,
             )
 
             if st.button("Submit Writing", type="primary", disabled=not AI_READY):
