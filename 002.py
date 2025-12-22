@@ -38,7 +38,6 @@ CUSTOM_QUESTION_PREFIX = "CUSTOM"
 def get_client():
     return OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-
 try:
     client = get_client()
     AI_READY = True
@@ -67,7 +66,6 @@ def get_supabase_client():
     except Exception:
         return None
 
-
 def supabase_ready() -> bool:
     return get_supabase_client() is not None
 
@@ -87,19 +85,11 @@ if "db_table_ready" not in st.session_state:
 if "custom_table_ready" not in st.session_state:
     st.session_state["custom_table_ready"] = False
 
-# Canvas history for custom toolbar (undo/redo)
-if "canvas_hist" not in st.session_state:
-    st.session_state["canvas_hist"] = []
-if "canvas_future" not in st.session_state:
-    st.session_state["canvas_future"] = []
-if "canvas_last_json" not in st.session_state:
-    st.session_state["canvas_last_json"] = None
-if "canvas_initial" not in st.session_state:
-    st.session_state["canvas_initial"] = None
-
-# Cache teacher-upload question image so we do not re-download on every stroke
+# Cache teacher-upload selection/images so no repeated download while writing
 if "selected_custom_id" not in st.session_state:
     st.session_state["selected_custom_id"] = None
+if "cached_custom_row" not in st.session_state:
+    st.session_state["cached_custom_row"] = None
 if "cached_question_img" not in st.session_state:
     st.session_state["cached_question_img"] = None
 if "cached_q_path" not in st.session_state:
@@ -107,9 +97,17 @@ if "cached_q_path" not in st.session_state:
 if "cached_ms_path" not in st.session_state:
     st.session_state["cached_ms_path"] = None
 
-# Lazy download bytes for writing (avoid PNG encoding on every stroke)
-if "writing_png_bytes" not in st.session_state:
-    st.session_state["writing_png_bytes"] = None
+# Cache custom question list to avoid DB query work during canvas usage
+if "cached_dfq" not in st.session_state:
+    st.session_state["cached_dfq"] = None
+if "cached_assignments" not in st.session_state:
+    st.session_state["cached_assignments"] = ["All"]
+if "cached_labels_map" not in st.session_state:
+    st.session_state["cached_labels_map"] = {}
+if "cached_labels" not in st.session_state:
+    st.session_state["cached_labels"] = []
+if "cached_labels_map_key" not in st.session_state:
+    st.session_state["cached_labels_map_key"] = None
 
 # =========================
 # --- QUESTION BANK (BUILT-IN) ---
@@ -131,7 +129,6 @@ QUESTIONS = {
 #  ROBUST DATABASE LAYER
 # =========================
 def get_db_driver_type():
-    """Detects if psycopg (v3) or psycopg2 (v2) is installed."""
     try:
         import psycopg  # noqa
         return "psycopg"
@@ -142,59 +139,45 @@ def get_db_driver_type():
         except ImportError:
             return None
 
-
 def _normalize_db_url(db_url: str) -> str:
-    """Forces the URL to match the installed driver to prevent connection errors."""
     u = (db_url or "").strip()
     if not u:
         return ""
-
     if u.startswith("postgres://"):
         u = u.replace("postgres://", "postgresql://", 1)
 
     driver = get_db_driver_type()
-
     if driver == "psycopg":
         if u.startswith("postgresql://") and "psycopg" not in u:
             u = u.replace("postgresql://", "postgresql+psycopg://", 1)
     elif driver == "psycopg2":
         if u.startswith("postgresql://") and "psycopg2" not in u:
             u = u.replace("postgresql://", "postgresql+psycopg2://", 1)
-
     return u
-
 
 @st.cache_resource
 def get_db_engine():
     raw_url = st.secrets.get("DATABASE_URL", "")
     url = _normalize_db_url(raw_url)
-
     if not url:
         return None
-
     if not get_db_driver_type():
         return None
-
     try:
         return create_engine(url, pool_pre_ping=True)
     except Exception as e:
         st.write(f"DB Engine Error: {e}")
         return None
 
-
 def db_ready() -> bool:
     return get_db_engine() is not None
 
-
 def ensure_attempts_table():
-    """Creates table 'physics_attempts_v1' if missing."""
     if st.session_state.get("db_table_ready", False):
         return
-
     eng = get_db_engine()
     if eng is None:
         return
-
     ddl = """
     create table if not exists public.physics_attempts_v1 (
       id bigserial primary key,
@@ -218,13 +201,10 @@ def ensure_attempts_table():
         st.session_state["db_last_error"] = f"Table Creation Error: {e}"
         st.session_state["db_table_ready"] = False
 
-
 def insert_attempt(student_id: str, question_key: str, report: dict, mode: str):
-    """Inserts a student attempt into the database."""
     eng = get_db_engine()
     if eng is None:
         return
-
     ensure_attempts_table()
 
     sid = (student_id or "").strip()
@@ -244,7 +224,6 @@ def insert_attempt(student_id: str, question_key: str, report: dict, mode: str):
         (:student_id, :question_key, :mode, :marks_awarded, :max_marks, :summary,
          CAST(:feedback_points AS jsonb), CAST(:next_steps AS jsonb))
     """
-
     try:
         with eng.begin() as conn:
             conn.execute(text(query), {
@@ -261,15 +240,11 @@ def insert_attempt(student_id: str, question_key: str, report: dict, mode: str):
     except Exception as e:
         st.session_state["db_last_error"] = f"Insert Error: {e}"
 
-
 def load_attempts_df(limit: int = 5000) -> pd.DataFrame:
-    """Loads attempts for the dashboard."""
     eng = get_db_engine()
     if eng is None:
         return pd.DataFrame()
-
     ensure_attempts_table()
-
     try:
         with eng.connect() as conn:
             df = pd.read_sql(
@@ -282,11 +257,9 @@ def load_attempts_df(limit: int = 5000) -> pd.DataFrame:
                 conn,
                 params={"limit": int(limit)},
             )
-
         if not df.empty:
             df["marks_awarded"] = pd.to_numeric(df["marks_awarded"], errors="coerce").fillna(0).astype(int)
             df["max_marks"] = pd.to_numeric(df["max_marks"], errors="coerce").fillna(0).astype(int)
-
         return df
     except Exception as e:
         st.session_state["db_last_error"] = f"Load Error: {e}"
@@ -298,11 +271,9 @@ def load_attempts_df(limit: int = 5000) -> pd.DataFrame:
 def ensure_custom_questions_table():
     if st.session_state.get("custom_table_ready", False):
         return
-
     eng = get_db_engine()
     if eng is None:
         return
-
     ddl = """
     create table if not exists public.custom_questions_v1 (
       id bigserial primary key,
@@ -328,7 +299,6 @@ def ensure_custom_questions_table():
         st.session_state["db_last_error"] = f"Custom Table Creation Error: {e}"
         st.session_state["custom_table_ready"] = False
 
-
 def insert_custom_question(created_by: str,
                           assignment_name: str,
                           question_label: str,
@@ -341,7 +311,6 @@ def insert_custom_question(created_by: str,
     eng = get_db_engine()
     if eng is None:
         return False
-
     ensure_custom_questions_table()
 
     query = """
@@ -370,14 +339,11 @@ def insert_custom_question(created_by: str,
         st.session_state["db_last_error"] = f"Insert Custom Question Error: {e}"
         return False
 
-
 def load_custom_questions_df(limit: int = 2000) -> pd.DataFrame:
     eng = get_db_engine()
     if eng is None:
         return pd.DataFrame()
-
     ensure_custom_questions_table()
-
     try:
         with eng.connect() as conn:
             df = pd.read_sql(
@@ -395,14 +361,11 @@ def load_custom_questions_df(limit: int = 2000) -> pd.DataFrame:
         st.session_state["db_last_error"] = f"Load Custom Questions Error: {e}"
         return pd.DataFrame()
 
-
 def load_custom_question_by_id(qid: int) -> dict:
     eng = get_db_engine()
     if eng is None:
         return {}
-
     ensure_custom_questions_table()
-
     try:
         with eng.connect() as conn:
             row = conn.execute(
@@ -415,7 +378,6 @@ def load_custom_question_by_id(qid: int) -> dict:
                 """),
                 {"id": int(qid)}
             ).mappings().first()
-
         return dict(row) if row else {}
     except Exception as e:
         st.session_state["db_last_error"] = f"Load Custom Question Error: {e}"
@@ -430,58 +392,44 @@ def slugify(s: str) -> str:
     s = re.sub(r"-{2,}", "-", s).strip("-")
     return s or "untitled"
 
-
 def upload_to_storage(path: str, file_bytes: bytes, content_type: str) -> bool:
     sb = get_supabase_client()
     if sb is None:
         st.session_state["db_last_error"] = "Supabase Storage not configured."
         return False
-
     try:
         res = sb.storage.from_(STORAGE_BUCKET).upload(
             path,
             file_bytes,
-            {
-                "content-type": content_type,
-                "upsert": "true",
-            }
+            {"content-type": content_type, "upsert": "true"}
         )
-
         err = None
         if hasattr(res, "error"):
             err = getattr(res, "error")
         elif isinstance(res, dict):
             err = res.get("error")
-
         if err:
             raise RuntimeError(str(err))
-
         return True
     except Exception as e:
         st.session_state["db_last_error"] = f"Storage Upload Error: {e}"
         return False
 
-
 def download_from_storage(path: str) -> bytes:
     sb = get_supabase_client()
     if sb is None:
         return b""
-
     try:
         res = sb.storage.from_(STORAGE_BUCKET).download(path)
-
         if isinstance(res, (bytes, bytearray)):
             return bytes(res)
-
         if hasattr(res, "data") and res.data is not None:
             if isinstance(res.data, (bytes, bytearray)):
                 return bytes(res.data)
-
         return b""
     except Exception as e:
         st.session_state["db_last_error"] = f"Storage Download Error: {e}"
         return b""
-
 
 def bytes_to_pil(img_bytes: bytes) -> Image.Image:
     img = Image.open(io.BytesIO(img_bytes))
@@ -497,7 +445,6 @@ def encode_image(image_pil: Image.Image) -> str:
     image_pil.save(buffered, format="PNG", optimize=True)
     return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
-
 def safe_parse_json(text_str: str):
     try:
         return json.loads(text_str)
@@ -511,14 +458,12 @@ def safe_parse_json(text_str: str):
             return None
     return None
 
-
 def clamp_int(value, lo, hi, default=0):
     try:
         v = int(value)
     except Exception:
         v = default
     return max(lo, min(hi, v))
-
 
 def canvas_has_ink(image_data: np.ndarray) -> bool:
     if image_data is None:
@@ -533,7 +478,6 @@ def canvas_has_ink(image_data: np.ndarray) -> bool:
     ink = (diff > 60) & (alpha > 30)
     return (ink.mean() > 0.001)
 
-
 def preprocess_canvas_image(image_data: np.ndarray) -> Image.Image:
     raw_img = Image.fromarray(image_data.astype("uint8"))
     if raw_img.mode == "RGBA":
@@ -546,45 +490,6 @@ def preprocess_canvas_image(image_data: np.ndarray) -> Image.Image:
         ratio = MAX_IMAGE_WIDTH / img.width
         img = img.resize((MAX_IMAGE_WIDTH, int(img.height * ratio)))
     return img
-
-
-def _apply_canvas_state(new_json):
-    st.session_state["canvas_initial"] = new_json
-    st.session_state["canvas_key"] += 1
-    st.rerun()
-
-
-def _track_canvas_history(cur_json):
-    if cur_json is None:
-        return
-
-    try:
-        cur_json_str = json.dumps(cur_json, sort_keys=True)
-    except Exception:
-        return
-
-    last = st.session_state.get("canvas_last_json", None)
-    if last is None:
-        st.session_state["canvas_last_json"] = cur_json
-        return
-
-    try:
-        last_str = json.dumps(last, sort_keys=True)
-    except Exception:
-        st.session_state["canvas_last_json"] = cur_json
-        return
-
-    if cur_json_str != last_str:
-        st.session_state["canvas_hist"].append(last)
-        st.session_state["canvas_future"] = []
-        st.session_state["canvas_last_json"] = cur_json
-
-
-def _clear_canvas_history():
-    st.session_state["canvas_hist"] = []
-    st.session_state["canvas_future"] = []
-    st.session_state["canvas_last_json"] = None
-    st.session_state["canvas_initial"] = None
 
 # =========================
 # --- MARKING (BUILT-IN) ---
@@ -743,7 +648,6 @@ Max Marks: {int(max_marks)}
             "next_steps": []
         }
 
-
 def render_report(report: dict):
     st.markdown(f"**Marks:** {report.get('marks_awarded', 0)} / {report.get('max_marks', 0)}")
     if report.get("summary"):
@@ -789,11 +693,11 @@ with tab_student:
     col1, col2 = st.columns([5, 4])
 
     selected_is_custom = (source == "Teacher Uploads")
-    custom_row = {}
     q_key = None
     q_data = None
     question_img = None
     max_marks = None
+    custom_row = {}
 
     with col1:
         st.subheader("📝 The Question")
@@ -812,63 +716,76 @@ with tab_student:
             max_marks = q_data["marks"]
         else:
             ensure_custom_questions_table()
-            dfq = load_custom_questions_df(limit=2000)
-            if dfq.empty:
+
+            if st.session_state["cached_dfq"] is None:
+                dfq = load_custom_questions_df(limit=2000)
+                st.session_state["cached_dfq"] = dfq
+                st.session_state["cached_assignments"] = ["All"] + sorted(dfq["assignment_name"].dropna().unique().tolist()) if not dfq.empty else ["All"]
+            else:
+                dfq = st.session_state["cached_dfq"]
+
+            if dfq is None or dfq.empty:
                 st.info("No teacher-uploaded questions yet.")
             else:
-                assignments = ["All"] + sorted(dfq["assignment_name"].dropna().unique().tolist())
-                assignment_filter = st.selectbox("Assignment:", assignments)
+                assignment_filter = st.selectbox("Assignment:", st.session_state["cached_assignments"], key="student_assignment_filter")
 
-                if assignment_filter != "All":
-                    dfq2 = dfq[dfq["assignment_name"] == assignment_filter].copy()
+                map_key = f"labels_{assignment_filter}"
+                if st.session_state.get("cached_labels_map_key") != map_key:
+                    if assignment_filter != "All":
+                        dfq2 = dfq[dfq["assignment_name"] == assignment_filter].copy()
+                    else:
+                        dfq2 = dfq.copy()
+
+                    dfq2["label"] = dfq2.apply(
+                        lambda r: f"{r['assignment_name']} | {r['question_label']} ({int(r['max_marks'])} marks) [id {int(r['id'])}]",
+                        axis=1
+                    )
+                    labels_map = {row["label"]: int(row["id"]) for _, row in dfq2.iterrows()}
+                    st.session_state["cached_labels_map"] = labels_map
+                    st.session_state["cached_labels"] = list(labels_map.keys())
+                    st.session_state["cached_labels_map_key"] = map_key
+
+                choices = st.session_state.get("cached_labels", [])
+                if not choices:
+                    st.info("No questions in this assignment filter.")
                 else:
-                    dfq2 = dfq.copy()
+                    choice = st.selectbox("Select Question:", choices, key="student_custom_choice")
+                    chosen_id = int(st.session_state["cached_labels_map"][choice])
 
-                dfq2["label"] = dfq2.apply(
-                    lambda r: f"{r['assignment_name']} | {r['question_label']} ({int(r['max_marks'])} marks) [id {int(r['id'])}]",
-                    axis=1
-                )
-                choices = dfq2["label"].tolist()
-                choice = st.selectbox("Select Question:", choices)
-
-                chosen_id = int(dfq2[dfq2["label"] == choice]["id"].iloc[0])
-                custom_row = load_custom_question_by_id(chosen_id)
-
-                if custom_row:
-                    max_marks = int(custom_row.get("max_marks", 1))
-                    q_key = f"{CUSTOM_QUESTION_PREFIX}:{int(custom_row['id'])}:{custom_row.get('assignment_name','')}:{custom_row.get('question_label','')}"
-                    qtext = (custom_row.get("question_text") or "").strip()
-
-                    # ---- IMPORTANT FIX: cache question image in session_state to avoid re-downloading while writing
                     if st.session_state["selected_custom_id"] != chosen_id:
                         st.session_state["selected_custom_id"] = chosen_id
-                        st.session_state["cached_q_path"] = custom_row["question_image_path"]
-                        st.session_state["cached_ms_path"] = custom_row["markscheme_image_path"]
+                        custom_row = load_custom_question_by_id(chosen_id)
+                        st.session_state["cached_custom_row"] = custom_row
 
-                        q_bytes = download_from_storage(st.session_state["cached_q_path"])
+                        st.session_state["cached_q_path"] = custom_row.get("question_image_path")
+                        st.session_state["cached_ms_path"] = custom_row.get("markscheme_image_path")
+
+                        q_bytes = download_from_storage(st.session_state["cached_q_path"]) if st.session_state["cached_q_path"] else b""
                         st.session_state["cached_question_img"] = bytes_to_pil(q_bytes) if q_bytes else None
 
-                        # Clear writing-related state when switching question (prevents carrying over drawings)
-                        _clear_canvas_history()
-                        st.session_state["writing_png_bytes"] = None
                         st.session_state["feedback"] = None
                         st.session_state["canvas_key"] += 1
 
-                    question_img = st.session_state.get("cached_question_img", None)
+                    custom_row = st.session_state.get("cached_custom_row") or {}
+                    question_img = st.session_state.get("cached_question_img")
 
-                    if question_img is not None:
-                        st.image(question_img, caption="Question (teacher upload)", use_container_width=True)
-                    else:
-                        st.warning("Could not load question image from storage.")
+                    if custom_row:
+                        max_marks = int(custom_row.get("max_marks", 1))
+                        q_key = f"{CUSTOM_QUESTION_PREFIX}:{int(custom_row['id'])}:{custom_row.get('assignment_name','')}:{custom_row.get('question_label','')}"
+                        qtext = (custom_row.get("question_text") or "").strip()
 
-                    if qtext:
-                        st.markdown("**Extracted question text (optional):**")
-                        st.write(qtext)
+                        if question_img is not None:
+                            st.image(question_img, caption="Question (teacher upload)", use_container_width=True)
+                        else:
+                            st.warning("Could not load question image from storage.")
 
-                    st.caption(f"Max Marks: {max_marks}")
+                        if qtext:
+                            st.markdown("**Extracted question text (optional):**")
+                            st.write(qtext)
+
+                        st.caption(f"Max Marks: {max_marks}")
 
         st.write("")
-
         tab_type, tab_write = st.tabs(["⌨️ Type Answer", "✍️ Write Answer"])
 
         # -------------------------
@@ -918,45 +835,23 @@ with tab_student:
                             insert_attempt(student_id, q_key, st.session_state["feedback"], mode="text")
 
         # -------------------------
-        # Write Answer (Canvas) with custom toolbar (dark mode friendly)
+        # Write Answer (Canvas) — NO undo/redo, NO download, minimal reruns
         # -------------------------
         with tab_write:
-            tool_row = st.columns([2, 1, 1, 1])
+            tool_row = st.columns([2, 1])
             with tool_row[0]:
                 tool = st.radio("Tool", ["Pen", "Eraser"], horizontal=True, label_visibility="collapsed")
-
-            undo_disabled = (len(st.session_state["canvas_hist"]) == 0)
-            redo_disabled = (len(st.session_state["canvas_future"]) == 0)
-
-            undo_clicked = tool_row[1].button("↶ Undo", use_container_width=True, disabled=undo_disabled)
-            redo_clicked = tool_row[2].button("↷ Redo", use_container_width=True, disabled=redo_disabled)
-            clear_clicked = tool_row[3].button("🗑️ Clear", use_container_width=True)
-
-            if undo_clicked:
-                cur = st.session_state["canvas_last_json"]
-                if cur is not None:
-                    st.session_state["canvas_future"].append(cur)
-                prev = st.session_state["canvas_hist"].pop()
-                st.session_state["canvas_last_json"] = prev
-                _apply_canvas_state(prev)
-
-            if redo_clicked:
-                cur = st.session_state["canvas_last_json"]
-                if cur is not None:
-                    st.session_state["canvas_hist"].append(cur)
-                nxt = st.session_state["canvas_future"].pop()
-                st.session_state["canvas_last_json"] = nxt
-                _apply_canvas_state(nxt)
+            clear_clicked = tool_row[1].button("🗑️ Clear", use_container_width=True)
 
             if clear_clicked:
-                _clear_canvas_history()
-                st.session_state["writing_png_bytes"] = None
                 st.session_state["feedback"] = None
-                _apply_canvas_state(None)
+                st.session_state["canvas_key"] += 1
+                st.rerun()
 
             stroke_width = 2 if tool == "Pen" else 30
             stroke_color = "#000000" if tool == "Pen" else CANVAS_BG_HEX
 
+            # IMPORTANT: update_streamlit=False prevents rerun on every stroke
             canvas_result = st_canvas(
                 stroke_width=stroke_width,
                 stroke_color=stroke_color,
@@ -966,37 +861,7 @@ with tab_student:
                 drawing_mode="freedraw",
                 key=f"canvas_{st.session_state['canvas_key']}",
                 display_toolbar=False,
-                update_streamlit=True,
-                initial_drawing=st.session_state["canvas_initial"],
-            )
-
-            _track_canvas_history(canvas_result.json_data)
-
-            # ---- IMPORTANT FIX: lazy PNG generation to avoid CPU work on every stroke
-            dl_c1, dl_c2 = st.columns([1, 1])
-            prepare_dl = dl_c1.button(
-                "Prepare Download",
-                use_container_width=True,
-                disabled=(canvas_result.image_data is None)
-            )
-            clear_dl = dl_c2.button("Clear Download", use_container_width=True)
-
-            if clear_dl:
-                st.session_state["writing_png_bytes"] = None
-
-            if prepare_dl and canvas_result.image_data is not None:
-                img = Image.fromarray(canvas_result.image_data.astype("uint8"))
-                buf = io.BytesIO()
-                img.save(buf, format="PNG")
-                st.session_state["writing_png_bytes"] = buf.getvalue()
-
-            st.download_button(
-                "⬇️ Download Writing",
-                data=st.session_state["writing_png_bytes"] if st.session_state["writing_png_bytes"] else b"",
-                file_name="writing.png",
-                mime="image/png",
-                use_container_width=True,
-                disabled=(st.session_state["writing_png_bytes"] is None),
+                update_streamlit=False,
             )
 
             if st.button("Submit Writing", type="primary", disabled=not AI_READY):
@@ -1188,6 +1053,9 @@ with tab_bank:
                             markscheme_text=""
                         )
                         if ok_db:
+                            # Refresh cached list so new question appears immediately
+                            st.session_state["cached_dfq"] = None
+                            st.session_state["cached_labels_map_key"] = None
                             st.success("Saved. This question is now available under 'Teacher Uploads' in the Student tab.")
                         else:
                             st.error("Uploaded images, but failed to save metadata to DB. Check errors below.")
