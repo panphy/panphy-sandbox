@@ -97,6 +97,20 @@ if "canvas_last_json" not in st.session_state:
 if "canvas_initial" not in st.session_state:
     st.session_state["canvas_initial"] = None
 
+# Cache teacher-upload question image so we do not re-download on every stroke
+if "selected_custom_id" not in st.session_state:
+    st.session_state["selected_custom_id"] = None
+if "cached_question_img" not in st.session_state:
+    st.session_state["cached_question_img"] = None
+if "cached_q_path" not in st.session_state:
+    st.session_state["cached_q_path"] = None
+if "cached_ms_path" not in st.session_state:
+    st.session_state["cached_ms_path"] = None
+
+# Lazy download bytes for writing (avoid PNG encoding on every stroke)
+if "writing_png_bytes" not in st.session_state:
+    st.session_state["writing_png_bytes"] = None
+
 # =========================
 # --- QUESTION BANK (BUILT-IN) ---
 # =========================
@@ -429,7 +443,7 @@ def upload_to_storage(path: str, file_bytes: bytes, content_type: str) -> bool:
             file_bytes,
             {
                 "content-type": content_type,
-                "upsert": "true",  # must be string
+                "upsert": "true",
             }
         )
 
@@ -825,9 +839,24 @@ with tab_student:
                     q_key = f"{CUSTOM_QUESTION_PREFIX}:{int(custom_row['id'])}:{custom_row.get('assignment_name','')}:{custom_row.get('question_label','')}"
                     qtext = (custom_row.get("question_text") or "").strip()
 
-                    q_bytes = download_from_storage(custom_row["question_image_path"])
-                    if q_bytes:
-                        question_img = bytes_to_pil(q_bytes)
+                    # ---- IMPORTANT FIX: cache question image in session_state to avoid re-downloading while writing
+                    if st.session_state["selected_custom_id"] != chosen_id:
+                        st.session_state["selected_custom_id"] = chosen_id
+                        st.session_state["cached_q_path"] = custom_row["question_image_path"]
+                        st.session_state["cached_ms_path"] = custom_row["markscheme_image_path"]
+
+                        q_bytes = download_from_storage(st.session_state["cached_q_path"])
+                        st.session_state["cached_question_img"] = bytes_to_pil(q_bytes) if q_bytes else None
+
+                        # Clear writing-related state when switching question (prevents carrying over drawings)
+                        _clear_canvas_history()
+                        st.session_state["writing_png_bytes"] = None
+                        st.session_state["feedback"] = None
+                        st.session_state["canvas_key"] += 1
+
+                    question_img = st.session_state.get("cached_question_img", None)
+
+                    if question_img is not None:
                         st.image(question_img, caption="Question (teacher upload)", use_container_width=True)
                     else:
                         st.warning("Could not load question image from storage.")
@@ -865,7 +894,8 @@ with tab_student:
                                     "next_steps": []
                                 }
                             else:
-                                ms_bytes = download_from_storage(custom_row["markscheme_image_path"])
+                                ms_path = st.session_state.get("cached_ms_path") or custom_row.get("markscheme_image_path")
+                                ms_bytes = download_from_storage(ms_path) if ms_path else b""
                                 if not ms_bytes:
                                     st.session_state["feedback"] = {
                                         "marks_awarded": 0,
@@ -920,6 +950,7 @@ with tab_student:
 
             if clear_clicked:
                 _clear_canvas_history()
+                st.session_state["writing_png_bytes"] = None
                 st.session_state["feedback"] = None
                 _apply_canvas_state(None)
 
@@ -941,20 +972,31 @@ with tab_student:
 
             _track_canvas_history(canvas_result.json_data)
 
-            png_bytes = None
-            if canvas_result.image_data is not None:
+            # ---- IMPORTANT FIX: lazy PNG generation to avoid CPU work on every stroke
+            dl_c1, dl_c2 = st.columns([1, 1])
+            prepare_dl = dl_c1.button(
+                "Prepare Download",
+                use_container_width=True,
+                disabled=(canvas_result.image_data is None)
+            )
+            clear_dl = dl_c2.button("Clear Download", use_container_width=True)
+
+            if clear_dl:
+                st.session_state["writing_png_bytes"] = None
+
+            if prepare_dl and canvas_result.image_data is not None:
                 img = Image.fromarray(canvas_result.image_data.astype("uint8"))
                 buf = io.BytesIO()
                 img.save(buf, format="PNG")
-                png_bytes = buf.getvalue()
+                st.session_state["writing_png_bytes"] = buf.getvalue()
 
             st.download_button(
                 "⬇️ Download Writing",
-                data=png_bytes if png_bytes else b"",
+                data=st.session_state["writing_png_bytes"] if st.session_state["writing_png_bytes"] else b"",
                 file_name="writing.png",
                 mime="image/png",
                 use_container_width=True,
-                disabled=(png_bytes is None),
+                disabled=(st.session_state["writing_png_bytes"] is None),
             )
 
             if st.button("Submit Writing", type="primary", disabled=not AI_READY):
@@ -976,7 +1018,8 @@ with tab_student:
                                     "next_steps": []
                                 }
                             else:
-                                ms_bytes = download_from_storage(custom_row["markscheme_image_path"])
+                                ms_path = st.session_state.get("cached_ms_path") or custom_row.get("markscheme_image_path")
+                                ms_bytes = download_from_storage(ms_path) if ms_path else b""
                                 if not ms_bytes:
                                     st.session_state["feedback"] = {
                                         "marks_awarded": 0,
