@@ -687,7 +687,7 @@ with tab_student:
     top_col1, top_col2, top_col3 = st.columns([3, 2, 1])
 
     with top_col1:
-        st.title("⚛️ AI Examiner")
+        st.title("⚛️ PanPhy Skill Builder")
         st.caption(f"Powered by {MODEL_NAME}")
 
     with top_col3:
