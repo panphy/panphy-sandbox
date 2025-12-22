@@ -405,7 +405,7 @@ def upload_to_storage(path: str, file_bytes: bytes, content_type: str) -> bool:
         res = sb.storage.from_(STORAGE_BUCKET).upload(
             path,
             file_bytes,
-            {"content-type": content_type, "upsert": True}
+            {"content-type": content_type, "upsert": "true"}
         )
 
         # Handle different response shapes across supabase-py versions
