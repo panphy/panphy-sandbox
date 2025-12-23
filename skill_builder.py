@@ -904,7 +904,7 @@ with tab_student:
                                     )
 
                         if db_ready() and q_key:
-                            insert_attempt(student_id, q_key, st.session_state["feedback"], mode="drawing")
+                            insert_attempt(student_id, q_key, st.session_state["feedback"], mode="writing")
 
     with col2:
         st.subheader("👨‍🏫 Report")
