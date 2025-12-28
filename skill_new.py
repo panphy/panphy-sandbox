@@ -1226,7 +1226,7 @@ Max Marks: {int(max_marks)}
         if not isinstance(readback_warn, list):
             readback_warn = []
 
-        return {
+    return {
             "readback_type": readback_type,
             "readback_markdown": readback_md,
             "readback_warnings": [str(x) for x in readback_warn][:6],
@@ -1234,7 +1234,7 @@ Max Marks: {int(max_marks)}
             "max_marks": int(max_marks),
             "summary": str(data.get("summary", "")).strip(),
             "feedback_points": [str(x) for x in data.get("feedback_points", [])][:6],
-            "next_steps": [str(x) for x in data.get("next_steps", [])][:6])
+            "next_steps": [str(x) for x in data.get("next_steps", [])][:6]
         }
 
     except Exception as e:
