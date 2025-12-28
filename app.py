@@ -1551,9 +1551,9 @@ if nav == "🧑‍🎓 Student":
         if not db_ready():
             st.error("Database not ready. Configure DATABASE_URL first.")
         else:
-            # dfb is loaded/cached earlier in the app when DB is ready.
-            if dfb is None or getattr(dfb, "empty", True):
-                st.info("No questions in the database yet. Ask a teacher to generate or upload questions in the Question Bank page.")
+            dfb = load_question_bank_df(limit=5000)
+            if dfb.empty:
+                st.info("No questions in the database yet. Ask your teacher to generate or upload questions in the Question Bank page.")
             else:
                 if source == "AI Practice":
                     df_src = dfb[dfb["source"] == "ai_generated"].copy()
