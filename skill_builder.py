@@ -156,6 +156,10 @@ def _normalize_db_url(db_url: str) -> str:
     return u
 
 @st.cache_resource
+def _cached_engine(url: str):
+    # Cache only successful engine creation by keying on the URL.
+    return create_engine(url, pool_pre_ping=True)
+
 def get_db_engine():
     raw_url = st.secrets.get("DATABASE_URL", "")
     url = _normalize_db_url(raw_url)
@@ -164,9 +168,10 @@ def get_db_engine():
     if not get_db_driver_type():
         return None
     try:
-        return create_engine(url, pool_pre_ping=True)
+        return _cached_engine(url)
     except Exception as e:
-        st.write(f"DB Engine Error: {e}")
+        # Do not cache failures forever, so we do not store None inside cache_resource.
+        st.session_state["db_last_error"] = f"DB Engine Error: {type(e).__name__}: {e}"
         return None
 
 def db_ready() -> bool:
@@ -178,7 +183,8 @@ def ensure_attempts_table():
     eng = get_db_engine()
     if eng is None:
         return
-    ddl = """
+
+    ddl_create = """
     create table if not exists public.physics_attempts_v1 (
       id bigserial primary key,
       created_at timestamptz not null default now(),
@@ -192,13 +198,25 @@ def ensure_attempts_table():
       next_steps jsonb
     );
     """
+
+    # Safe migration: add columns if missing (no data loss)
+    ddl_alter = """
+    alter table public.physics_attempts_v1
+      add column if not exists readback_type text;
+    alter table public.physics_attempts_v1
+      add column if not exists readback_markdown text;
+    alter table public.physics_attempts_v1
+      add column if not exists readback_warnings jsonb;
+    """
+
     try:
         with eng.begin() as conn:
-            conn.execute(text(ddl))
+            conn.execute(text(ddl_create))
+            conn.execute(text(ddl_alter))
         st.session_state["db_last_error"] = ""
         st.session_state["db_table_ready"] = True
     except Exception as e:
-        st.session_state["db_last_error"] = f"Table Creation Error: {e}"
+        st.session_state["db_last_error"] = f"Table Creation Error: {type(e).__name__}: {e}"
         st.session_state["db_table_ready"] = False
 
 def insert_attempt(student_id: str, question_key: str, report: dict, mode: str):
@@ -217,12 +235,18 @@ def insert_attempt(student_id: str, question_key: str, report: dict, mode: str):
     fb_json = json.dumps(report.get("feedback_points", [])[:6])
     ns_json = json.dumps(report.get("next_steps", [])[:6])
 
+    rb_type = str(report.get("readback_type", "") or "")[:40]
+    rb_md = str(report.get("readback_markdown", "") or "")[:8000]
+    rb_warn = json.dumps(report.get("readback_warnings", [])[:6])
+
     query = """
         insert into public.physics_attempts_v1
-        (student_id, question_key, mode, marks_awarded, max_marks, summary, feedback_points, next_steps)
+        (student_id, question_key, mode, marks_awarded, max_marks, summary, feedback_points, next_steps,
+         readback_type, readback_markdown, readback_warnings)
         values
         (:student_id, :question_key, :mode, :marks_awarded, :max_marks, :summary,
-         CAST(:feedback_points AS jsonb), CAST(:next_steps AS jsonb))
+         CAST(:feedback_points AS jsonb), CAST(:next_steps AS jsonb),
+         :readback_type, :readback_markdown, CAST(:readback_warnings AS jsonb))
     """
     try:
         with eng.begin() as conn:
@@ -234,11 +258,14 @@ def insert_attempt(student_id: str, question_key: str, report: dict, mode: str):
                 "max_marks": m_max,
                 "summary": summ,
                 "feedback_points": fb_json,
-                "next_steps": ns_json
+                "next_steps": ns_json,
+                "readback_type": rb_type if rb_type else None,
+                "readback_markdown": rb_md if rb_md else None,
+                "readback_warnings": rb_warn
             })
         st.session_state["db_last_error"] = None
     except Exception as e:
-        st.session_state["db_last_error"] = f"Insert Error: {e}"
+        st.session_state["db_last_error"] = f"Insert Error: {type(e).__name__}: {e}"
 
 def load_attempts_df(limit: int = 5000) -> pd.DataFrame:
     eng = get_db_engine()
@@ -249,7 +276,8 @@ def load_attempts_df(limit: int = 5000) -> pd.DataFrame:
         with eng.connect() as conn:
             df = pd.read_sql(
                 text("""
-                    select created_at, student_id, question_key, mode, marks_awarded, max_marks
+                    select created_at, student_id, question_key, mode, marks_awarded, max_marks,
+                           readback_type
                     from public.physics_attempts_v1
                     order by created_at desc
                     limit :limit
@@ -262,7 +290,7 @@ def load_attempts_df(limit: int = 5000) -> pd.DataFrame:
             df["max_marks"] = pd.to_numeric(df["max_marks"], errors="coerce").fillna(0).astype(int)
         return df
     except Exception as e:
-        st.session_state["db_last_error"] = f"Load Error: {e}"
+        st.session_state["db_last_error"] = f"Load Error: {type(e).__name__}: {e}"
         return pd.DataFrame()
 
 # =========================
@@ -296,7 +324,7 @@ def ensure_custom_questions_table():
             conn.execute(text(ddl))
         st.session_state["custom_table_ready"] = True
     except Exception as e:
-        st.session_state["db_last_error"] = f"Custom Table Creation Error: {e}"
+        st.session_state["db_last_error"] = f"Custom Table Creation Error: {type(e).__name__}: {e}"
         st.session_state["custom_table_ready"] = False
 
 def insert_custom_question(created_by: str,
@@ -336,7 +364,7 @@ def insert_custom_question(created_by: str,
             })
         return True
     except Exception as e:
-        st.session_state["db_last_error"] = f"Insert Custom Question Error: {e}"
+        st.session_state["db_last_error"] = f"Insert Custom Question Error: {type(e).__name__}: {e}"
         return False
 
 def load_custom_questions_df(limit: int = 2000) -> pd.DataFrame:
@@ -358,7 +386,7 @@ def load_custom_questions_df(limit: int = 2000) -> pd.DataFrame:
             )
         return df
     except Exception as e:
-        st.session_state["db_last_error"] = f"Load Custom Questions Error: {e}"
+        st.session_state["db_last_error"] = f"Load Custom Questions Error: {type(e).__name__}: {e}"
         return pd.DataFrame()
 
 def load_custom_question_by_id(qid: int) -> dict:
@@ -380,7 +408,7 @@ def load_custom_question_by_id(qid: int) -> dict:
             ).mappings().first()
         return dict(row) if row else {}
     except Exception as e:
-        st.session_state["db_last_error"] = f"Load Custom Question Error: {e}"
+        st.session_state["db_last_error"] = f"Load Custom Question Error: {type(e).__name__}: {e}"
         return {}
 
 # =========================
@@ -412,7 +440,7 @@ def upload_to_storage(path: str, file_bytes: bytes, content_type: str) -> bool:
             raise RuntimeError(str(err))
         return True
     except Exception as e:
-        st.session_state["db_last_error"] = f"Storage Upload Error: {e}"
+        st.session_state["db_last_error"] = f"Storage Upload Error: {type(e).__name__}: {e}"
         return False
 
 def download_from_storage(path: str) -> bytes:
@@ -428,7 +456,7 @@ def download_from_storage(path: str) -> bytes:
                 return bytes(res.data)
         return b""
     except Exception as e:
-        st.session_state["db_last_error"] = f"Storage Download Error: {e}"
+        st.session_state["db_last_error"] = f"Storage Download Error: {type(e).__name__}: {e}"
         return b""
 
 def bytes_to_pil(img_bytes: bytes) -> Image.Image:
@@ -492,24 +520,35 @@ def preprocess_canvas_image(image_data: np.ndarray) -> Image.Image:
     return img
 
 # =========================
-# --- MARKING (BUILT-IN) ---
+# --- MARKING + READBACK (BUILT-IN) ---
 # =========================
 def get_gpt_feedback(student_answer, q_data, is_image=False):
+    """
+    Returns a dict with marking report.
+    If is_image=True, also includes an AI readback of the handwriting/drawing so the student can check.
+    """
     max_marks = q_data["marks"]
 
     system_instr = f"""
 You are a strict GCSE Physics examiner.
+
 CONFIDENTIALITY RULE (CRITICAL):
 - The mark scheme is confidential. Do NOT reveal it, quote it, or paraphrase it.
+- When producing the readback, ONLY describe what is in the student's work. Do not use the mark scheme.
 - Output ONLY valid JSON, nothing else.
+
 Schema:
 {{
+  "readback_type": "<handwriting|diagram|mixed|unknown>",
+  "readback_markdown": "<Markdown with LaTeX where helpful. Keep it concise but complete. Use $...$ for maths.>",
+  "readback_warnings": ["<optional warning 1>", "<optional warning 2>"],
   "marks_awarded": <int>,
   "max_marks": <int>,
   "summary": "<1-2 sentences>",
   "feedback_points": ["<bullet 1>", "<bullet 2>"],
   "next_steps": ["<action 1>", "<action 2>"]
 }}
+
 Question: {q_data["question"]}
 Max Marks: {max_marks}
 """.strip()
@@ -525,19 +564,19 @@ Max Marks: {max_marks}
         messages.append({
             "role": "user",
             "content": [
-                {"type": "text", "text": "Mark this work. Return JSON only."},
+                {"type": "text", "text": "Mark this work. Also provide a short readback of what you think the student wrote/drew, in Markdown with LaTeX if needed. Return JSON only."},
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64_img}"}}
             ]
         })
     else:
         messages.append({
             "role": "user",
-            "content": f"Student Answer:\n{student_answer}\n\nReturn JSON only."
+            "content": f"Student Answer:\n{student_answer}\n\nReturn JSON only. (readback_markdown can be empty for typed answers)"
         })
 
     try:
         response = client.chat.completions.create(
-            model="gpt-5-mini",
+            model=MODEL_NAME,
             messages=messages,
             max_completion_tokens=2500,
             response_format={"type": "json_object"}
@@ -551,7 +590,16 @@ Max Marks: {max_marks}
         if not data:
             raise ValueError("No valid JSON parsed from response.")
 
+        readback_md = str(data.get("readback_markdown", "") or "").strip()
+        readback_type = str(data.get("readback_type", "") or "").strip()
+        readback_warn = data.get("readback_warnings", [])
+        if not isinstance(readback_warn, list):
+            readback_warn = []
+
         return {
+            "readback_type": readback_type,
+            "readback_markdown": readback_md,
+            "readback_warnings": [str(x) for x in readback_warn][:6],
             "marks_awarded": clamp_int(data.get("marks_awarded", 0), 0, max_marks),
             "max_marks": max_marks,
             "summary": str(data.get("summary", "")).strip(),
@@ -562,6 +610,9 @@ Max Marks: {max_marks}
     except Exception as e:
         print(f"Marking Error: {e}")
         return {
+            "readback_type": "",
+            "readback_markdown": "",
+            "readback_warnings": [],
             "marks_awarded": 0,
             "max_marks": max_marks,
             "summary": "The examiner could not process this attempt (AI Error).",
@@ -570,26 +621,37 @@ Max Marks: {max_marks}
         }
 
 # =========================
-# --- MARKING (CUSTOM QUESTION IMAGES) ---
+# --- MARKING + READBACK (CUSTOM QUESTION IMAGES) ---
 # =========================
 def get_gpt_feedback_custom(student_answer,
                             question_img: Image.Image,
                             markscheme_img: Image.Image,
                             max_marks: int,
                             is_student_image: bool = False):
+    """
+    Returns a dict with marking report.
+    If is_student_image=True, also includes an AI readback of the student's handwriting/drawing.
+    """
     system_instr = f"""
 You are a strict GCSE Physics examiner.
+
 CONFIDENTIALITY RULE (CRITICAL):
 - The mark scheme is confidential. Do NOT reveal it, quote it, or paraphrase it.
+- When producing the readback, ONLY describe what is in the student's work. Do not use the mark scheme.
 - Output ONLY valid JSON, nothing else.
+
 Schema:
 {{
+  "readback_type": "<handwriting|diagram|mixed|unknown>",
+  "readback_markdown": "<Markdown with LaTeX where helpful. Keep it concise but complete. Use $...$ for maths.>",
+  "readback_warnings": ["<optional warning 1>", "<optional warning 2>"],
   "marks_awarded": <int>,
   "max_marks": <int>,
   "summary": "<1-2 sentences>",
   "feedback_points": ["<bullet 1>", "<bullet 2>"],
   "next_steps": ["<action 1>", "<action 2>"]
 }}
+
 Max Marks: {int(max_marks)}
 """.strip()
 
@@ -597,7 +659,7 @@ Max Marks: {int(max_marks)}
     ms_b64 = encode_image(markscheme_img)
 
     content = [
-        {"type": "text", "text": "You will be shown: (1) question image, (2) mark scheme image (confidential), and the student answer. Mark it. Return JSON only."},
+        {"type": "text", "text": "You will be shown: (1) question image, (2) mark scheme image (confidential), and the student answer. Mark it. If the student answer is an image, also provide a readback of what the student wrote/drew (Markdown + LaTeX if needed). Return JSON only."},
         {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{q_b64}"}},
         {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{ms_b64}"}},
     ]
@@ -607,7 +669,7 @@ Max Marks: {int(max_marks)}
         content.append({"type": "text", "text": "Student answer (image):"})
         content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{sa_b64}"}})
     else:
-        content.append({"type": "text", "text": f"Student Answer (text):\n{student_answer}"})
+        content.append({"type": "text", "text": f"Student Answer (text):\n{student_answer}\n(readback_markdown can be empty for typed answers)"})
 
     messages = [
         {"role": "system", "content": system_instr},
@@ -616,7 +678,7 @@ Max Marks: {int(max_marks)}
 
     try:
         response = client.chat.completions.create(
-            model="gpt-5-mini",
+            model=MODEL_NAME,
             messages=messages,
             max_completion_tokens=2500,
             response_format={"type": "json_object"}
@@ -630,7 +692,16 @@ Max Marks: {int(max_marks)}
         if not data:
             raise ValueError("No valid JSON parsed from response.")
 
+        readback_md = str(data.get("readback_markdown", "") or "").strip()
+        readback_type = str(data.get("readback_type", "") or "").strip()
+        readback_warn = data.get("readback_warnings", [])
+        if not isinstance(readback_warn, list):
+            readback_warn = []
+
         return {
+            "readback_type": readback_type,
+            "readback_markdown": readback_md,
+            "readback_warnings": [str(x) for x in readback_warn][:6],
             "marks_awarded": clamp_int(data.get("marks_awarded", 0), 0, int(max_marks)),
             "max_marks": int(max_marks),
             "summary": str(data.get("summary", "")).strip(),
@@ -641,6 +712,9 @@ Max Marks: {int(max_marks)}
     except Exception as e:
         print(f"Custom Marking Error: {e}")
         return {
+            "readback_type": "",
+            "readback_markdown": "",
+            "readback_warnings": [],
             "marks_awarded": 0,
             "max_marks": int(max_marks),
             "summary": "The examiner could not process this attempt (AI Error).",
@@ -649,6 +723,21 @@ Max Marks: {int(max_marks)}
         }
 
 def render_report(report: dict):
+    # Readback box first (only if present)
+    readback_md = (report.get("readback_markdown") or "").strip()
+    if readback_md:
+        st.markdown("**AI readback (what it thinks you wrote/drew):**")
+        with st.container(border=True):
+            st.markdown(readback_md)
+
+        rb_warn = report.get("readback_warnings", [])
+        if rb_warn:
+            st.caption("Readback notes:")
+            for w in rb_warn[:6]:
+                st.write(f"- {w}")
+
+        st.divider()
+
     st.markdown(f"**Marks:** {report.get('marks_awarded', 0)} / {report.get('max_marks', 0)}")
     if report.get("summary"):
         st.markdown(f"**Summary:** {report.get('summary')}")
@@ -804,6 +893,9 @@ with tab_student:
                         else:
                             if not custom_row or question_img is None:
                                 st.session_state["feedback"] = {
+                                    "readback_type": "",
+                                    "readback_markdown": "",
+                                    "readback_warnings": [],
                                     "marks_awarded": 0,
                                     "max_marks": int(max_marks or 1),
                                     "summary": "Custom question not ready (missing images).",
@@ -815,6 +907,9 @@ with tab_student:
                                 ms_bytes = download_from_storage(ms_path) if ms_path else b""
                                 if not ms_bytes:
                                     st.session_state["feedback"] = {
+                                        "readback_type": "",
+                                        "readback_markdown": "",
+                                        "readback_warnings": [],
                                         "marks_awarded": 0,
                                         "max_marks": int(max_marks or 1),
                                         "summary": "Mark scheme image missing.",
@@ -835,7 +930,7 @@ with tab_student:
                             insert_attempt(student_id, q_key, st.session_state["feedback"], mode="text")
 
         # -------------------------
-        # Write Answer (Canvas) — NO undo/redo, NO download, minimal reruns
+        # Write Answer (Canvas)
         # -------------------------
         with tab_write:
             tool_row = st.columns([2, 1])
@@ -851,7 +946,6 @@ with tab_student:
             stroke_width = 2 if tool == "Pen" else 30
             stroke_color = "#000000" if tool == "Pen" else CANVAS_BG_HEX
 
-            # IMPORTANT: update_streamlit=False prevents rerun on every stroke
             canvas_result = st_canvas(
                 stroke_width=stroke_width,
                 stroke_color=stroke_color,
@@ -876,6 +970,9 @@ with tab_student:
                         else:
                             if not custom_row or question_img is None:
                                 st.session_state["feedback"] = {
+                                    "readback_type": "",
+                                    "readback_markdown": "",
+                                    "readback_warnings": [],
                                     "marks_awarded": 0,
                                     "max_marks": int(max_marks or 1),
                                     "summary": "Custom question not ready (missing images).",
@@ -887,6 +984,9 @@ with tab_student:
                                 ms_bytes = download_from_storage(ms_path) if ms_path else b""
                                 if not ms_bytes:
                                     st.session_state["feedback"] = {
+                                        "readback_type": "",
+                                        "readback_markdown": "",
+                                        "readback_warnings": [],
                                         "marks_awarded": 0,
                                         "max_marks": int(max_marks or 1),
                                         "summary": "Mark scheme image missing.",
@@ -924,12 +1024,24 @@ with tab_student:
 with tab_teacher:
     st.subheader("🔒 Teacher Dashboard")
 
+    with st.expander("Database tools"):
+        if st.button("Reconnect to database"):
+            _cached_engine.clear()
+            st.session_state["db_table_ready"] = False
+            st.session_state["custom_table_ready"] = False
+            st.rerun()
+        if st.session_state.get("db_last_error"):
+            st.write("Last DB error:")
+            st.code(st.session_state["db_last_error"])
+
     if not st.secrets.get("DATABASE_URL", "").strip():
         st.info("Database not configured in secrets.")
     elif not db_ready():
         st.error("Database Connection Failed. Check drivers and URL.")
         if not get_db_driver_type():
             st.caption("No Postgres driver found. Add 'psycopg[binary]' (or psycopg2-binary) to requirements.txt")
+        if st.session_state.get("db_last_error"):
+            st.caption(st.session_state["db_last_error"])
     else:
         teacher_pw = st.text_input("Teacher password", type="password")
         if teacher_pw and teacher_pw == st.secrets.get("TEACHER_PASSWORD", ""):
@@ -978,6 +1090,16 @@ with tab_teacher:
 # -------------------------
 with tab_bank:
     st.subheader("📚 Question Bank (Upload one question at a time)")
+
+    with st.expander("Database tools"):
+        if st.button("Reconnect to database", key="reconnect_db_bank"):
+            _cached_engine.clear()
+            st.session_state["db_table_ready"] = False
+            st.session_state["custom_table_ready"] = False
+            st.rerun()
+        if st.session_state.get("db_last_error"):
+            st.write("Last DB error:")
+            st.code(st.session_state["db_last_error"])
 
     if not db_ready():
         st.error("Database not ready. Configure DATABASE_URL first.")
@@ -1053,7 +1175,6 @@ with tab_bank:
                             markscheme_text=""
                         )
                         if ok_db:
-                            # Refresh cached list so new question appears immediately
                             st.session_state["cached_dfq"] = None
                             st.session_state["cached_labels_map_key"] = None
                             st.success("Saved. This question is now available under 'Teacher Uploads' in the Student tab.")
