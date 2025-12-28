@@ -1234,7 +1234,7 @@ Max Marks: {int(max_marks)}
             "max_marks": int(max_marks),
             "summary": str(data.get("summary", "")).strip(),
             "feedback_points": [str(x) for x in data.get("feedback_points", [])][:6],
-            "next_steps": [str(x) for x in data.get("next_steps", [])[:6])
+            "next_steps": [str(x) for x in data.get("next_steps", [])][:6])
         }
 
     except Exception as e:
