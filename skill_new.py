@@ -10,8 +10,6 @@ import numpy as np
 import pandas as pd
 from sqlalchemy import create_engine, text
 import secrets as pysecrets
-
-# NEW: logging + helpers
 import logging
 from logging.handlers import RotatingFileHandler
 import os
@@ -1117,7 +1115,7 @@ Max Marks: {max_marks}
             "readback_warnings": [],
             "marks_awarded": 0,
             "max_marks": max_marks,
-            "summary": "The examiner could not process this attempt (AI Error).",
+            "summary": "The AI could not process this attempt.",
             "feedback_points": ["Please try submitting again.", f"Error details: {str(e)[:50]}"],
             "next_steps": []
         }
