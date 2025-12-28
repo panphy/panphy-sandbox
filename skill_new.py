@@ -11,86 +11,83 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 import secrets as pysecrets
 
-# NEW: logging + utilities
+# NEW: logging + helpers
 import logging
-import sys
+from logging.handlers import RotatingFileHandler
 import os
 import time
 from datetime import datetime, timedelta, timezone
-from logging.handlers import RotatingFileHandler
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from zoneinfo import ZoneInfo
+from concurrent.futures import ThreadPoolExecutor
+from typing import Tuple, Optional
 
 # ============================================================
-# 1) DDL for rate limiting table (PostgreSQL)
+# 1) NEW DATABASE TABLE DDL (rate_limits)
 # ============================================================
 RATE_LIMITS_DDL = """
 create table if not exists public.rate_limits (
   student_id text primary key,
-  submission_count int not null,
-  window_start_time timestamptz not null
+  submission_count int not null default 0,
+  window_start_time timestamptz not null default now()
 );
-
-create index if not exists idx_rate_limits_window_start
+create index if not exists idx_rate_limits_window_start_time
   on public.rate_limits (window_start_time);
 """.strip()
 
 # ============================================================
 # 4) LOGGING FOR DEBUGGING (configure at startup)
 # ============================================================
+class KVFormatter(logging.Formatter):
+    """Formatter that appends structured key-value pairs: [k=v] ..."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        base = super().format(record)
+        ctx = getattr(record, "ctx", None)
+        if isinstance(ctx, dict) and ctx:
+            # Keep stable key order for readability
+            keys = sorted(ctx.keys())
+            kv = " ".join([f"[{k}={ctx[k]}]" for k in keys if ctx[k] is not None and ctx[k] != ""])
+            if kv:
+                return f"{base} {kv}"
+        return base
+
+
 def setup_logging() -> logging.Logger:
     """
-    Logs to:
-      - Console (Streamlit Cloud log output)
-      - Rotating file (useful for local dev)
-    Uses structured-ish messages with [key=value] tags + extra fields.
+    Configure logging to console + file.
+    Console is useful on Streamlit Cloud; file is useful locally.
     """
     logger = logging.getLogger("panphy")
     if logger.handlers:
-        return logger  # already configured
+        return logger  # idempotent
 
     logger.setLevel(logging.INFO)
 
-    fmt = "%(asctime)s %(levelname)s %(message)s"
-    formatter = logging.Formatter(fmt=fmt, datefmt="%Y-%m-%d %H:%M:%S")
+    fmt = KVFormatter("%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 
     # Console handler
-    ch = logging.StreamHandler(sys.stdout)
+    ch = logging.StreamHandler()
     ch.setLevel(logging.INFO)
-    ch.setFormatter(formatter)
+    ch.setFormatter(fmt)
     logger.addHandler(ch)
 
-    # File handler (best-effort; Streamlit Cloud may be read-only in some envs)
+    # File handler (best-effort)
     try:
-        os.makedirs("logs", exist_ok=True)
-        fh = RotatingFileHandler("logs/app.log", maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+        log_path = os.environ.get("PANPHY_LOG_FILE", "panphy_app.log")
+        fh = RotatingFileHandler(log_path, maxBytes=2_000_000, backupCount=3)
         fh.setLevel(logging.INFO)
-        fh.setFormatter(formatter)
+        fh.setFormatter(fmt)
         logger.addHandler(fh)
     except Exception:
-        # Do not crash the app if file logging is unavailable
-        pass
+        # If file handler fails (permissions on cloud), we still have console logs.
+        logger.warning("File logging not available", extra={"ctx": {"component": "logger"}})
 
     logger.propagate = False
+    logger.info("Logging configured", extra={"ctx": {"component": "startup"}})
     return logger
 
 
 LOGGER = setup_logging()
-
-
-def _kv(**kwargs) -> str:
-    """Helper to format key-value tags like [student_id=10A_23] consistently."""
-    parts = []
-    for k, v in kwargs.items():
-        if v is None or v == "":
-            continue
-        safe = str(v).replace("\n", " ").replace("\r", " ")
-        parts.append(f"[{k}={safe}]")
-    return " ".join(parts)
-
-
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
 
 # =========================
 # --- PAGE CONFIG ---
@@ -112,19 +109,19 @@ MAX_IMAGE_WIDTH = 1024
 STORAGE_BUCKET = "physics-bank"
 CUSTOM_QUESTION_PREFIX = "CUSTOM"
 
-# NEW: rate limit constants
-RATE_LIMIT_MAX_PER_HOUR = 10
-RATE_LIMIT_WINDOW_SECONDS = 3600
+# Rate limiting constants
+RATE_LIMIT_MAX = 10
+RATE_LIMIT_WINDOW_SECONDS = 60 * 60  # 1 hour
 
-# NEW: upload limits
+# Image limits
 MAX_DIM_PX = 4000
-MAX_Q_IMG_MB = 5.0
-MAX_MS_IMG_MB = 5.0
-MAX_CANVAS_MB = 2.0
+QUESTION_MAX_MB = 5.0
+MARKSCHEME_MAX_MB = 5.0
+CANVAS_MAX_MB = 2.0
 
-# =========================
+# ============================================================
 # --- OPENAI CLIENT (CACHED) ---
-# =========================
+# ============================================================
 @st.cache_resource
 def get_client():
     return OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
@@ -133,9 +130,10 @@ def get_client():
 try:
     client = get_client()
     AI_READY = True
-except Exception:
+except Exception as e:
     st.error("⚠️ OpenAI API Key missing or invalid in Streamlit Secrets!")
     AI_READY = False
+    LOGGER.error("OpenAI client init failed", extra={"ctx": {"component": "openai", "error": type(e).__name__}})
 
 # =========================
 # --- SUPABASE STORAGE CLIENT (CACHED) ---
@@ -155,12 +153,14 @@ def get_supabase_client():
     try:
         from supabase import create_client
         return create_client(url, key)
-    except Exception:
+    except Exception as e:
+        LOGGER.error("Supabase client init failed", extra={"ctx": {"component": "supabase", "error": type(e).__name__}})
         return None
 
 
 def supabase_ready() -> bool:
     return get_supabase_client() is not None
+
 
 # =========================
 # --- SESSION STATE ---
@@ -177,8 +177,10 @@ if "db_table_ready" not in st.session_state:
     st.session_state["db_table_ready"] = False
 if "custom_table_ready" not in st.session_state:
     st.session_state["custom_table_ready"] = False
-if "rate_table_ready" not in st.session_state:
-    st.session_state["rate_table_ready"] = False
+
+# NEW: teacher session flag (for rate limit bypass)
+if "is_teacher" not in st.session_state:
+    st.session_state["is_teacher"] = False
 
 # Cache teacher-upload selection/images so no repeated download while writing
 if "selected_custom_id" not in st.session_state:
@@ -269,7 +271,7 @@ def get_db_engine():
         return _cached_engine(url)
     except Exception as e:
         st.session_state["db_last_error"] = f"DB Engine Error: {type(e).__name__}: {e}"
-        LOGGER.error(f"{_kv(area='db')} DB engine creation failed: {type(e).__name__}: {e}")
+        LOGGER.error("DB engine creation failed", extra={"ctx": {"component": "db", "error": type(e).__name__}})
         return None
 
 
@@ -315,57 +317,70 @@ def ensure_attempts_table():
             conn.execute(text(ddl_alter))
         st.session_state["db_last_error"] = ""
         st.session_state["db_table_ready"] = True
-        LOGGER.info(f"{_kv(area='db')} attempts table ready")
+        LOGGER.info("Attempts table ready", extra={"ctx": {"component": "db", "table": "physics_attempts_v1"}})
     except Exception as e:
         st.session_state["db_last_error"] = f"Table Creation Error: {type(e).__name__}: {e}"
         st.session_state["db_table_ready"] = False
-        LOGGER.error(f"{_kv(area='db')} attempts table creation failed: {type(e).__name__}: {e}")
+        LOGGER.error(
+            "Attempts table ensure failed",
+            extra={"ctx": {"component": "db", "table": "physics_attempts_v1", "error": type(e).__name__}},
+        )
 
 
-# =========================
-# 1) RATE LIMITING (DB TABLE + HELPERS)
-# =========================
+# ============================================================
+# 1) RATE LIMITING (stored in Postgres)
+# ============================================================
 def ensure_rate_limits_table():
-    if st.session_state.get("rate_table_ready", False):
-        return
     eng = get_db_engine()
     if eng is None:
         return
     try:
         with eng.begin() as conn:
             conn.execute(text(RATE_LIMITS_DDL))
-        st.session_state["rate_table_ready"] = True
-        LOGGER.info(f"{_kv(area='db')} rate_limits table ready")
+        LOGGER.info("Rate limits table ready", extra={"ctx": {"component": "db", "table": "rate_limits"}})
     except Exception as e:
-        st.session_state["db_last_error"] = f"Rate Table Creation Error: {type(e).__name__}: {e}"
-        st.session_state["rate_table_ready"] = False
-        LOGGER.error(f"{_kv(area='db')} rate_limits table creation failed: {type(e).__name__}: {e}")
+        # Non-fatal: app can still run, but rate limiting will be unavailable.
+        st.session_state["db_last_error"] = f"Rate Limits Table Error: {type(e).__name__}: {e}"
+        LOGGER.error("Rate limits table ensure failed", extra={"ctx": {"component": "db", "error": type(e).__name__}})
 
 
 def _effective_student_id(student_id: str) -> str:
     sid = (student_id or "").strip()
-    if not sid:
-        sid = f"anon_{st.session_state['anon_id']}"
-    return sid
+    if sid:
+        return sid
+    return f"anon_{st.session_state['anon_id']}"
 
 
-def check_rate_limit(student_id: str) -> tuple[bool, int, str]:
+def _format_reset_time(dt_utc: datetime) -> str:
+    """
+    Show reset time in Europe/London time (user timezone).
+    """
+    try:
+        tz = ZoneInfo("Europe/London")
+        local = dt_utc.astimezone(tz)
+        return local.strftime("%H:%M on %d %b %Y")
+    except Exception:
+        return dt_utc.strftime("%H:%M UTC on %d %b %Y")
+
+
+def check_rate_limit(student_id: str) -> Tuple[bool, int, str]:
     """
     Returns (allowed, remaining, reset_time_str).
-    - Resets the counter if window expired.
-    - Does NOT increment. Call increment_rate_limit() after passing check.
+    Teachers bypass rate limits.
     """
+    if st.session_state.get("is_teacher", False):
+        return True, RATE_LIMIT_MAX, ""
+
     eng = get_db_engine()
     if eng is None:
-        # If DB is down, we choose to allow (avoid blocking learning),
-        # but you can flip this to deny if cost control is more important.
-        return True, RATE_LIMIT_MAX_PER_HOUR, ""
+        # If DB isn't ready, fail open to avoid blocking students (but log it).
+        LOGGER.warning("Rate limit DB not ready, allowing request", extra={"ctx": {"component": "rate_limit"}})
+        return True, RATE_LIMIT_MAX, ""
 
     ensure_rate_limits_table()
 
-    sid = _effective_student_id(student_id)
-    now = _utc_now()
-    window = timedelta(seconds=RATE_LIMIT_WINDOW_SECONDS)
+    sid = (student_id or "").strip() or f"anon_{st.session_state['anon_id']}"
+    now_utc = datetime.now(timezone.utc)
 
     try:
         with eng.begin() as conn:
@@ -380,110 +395,100 @@ def check_rate_limit(student_id: str) -> tuple[bool, int, str]:
             ).mappings().first()
 
             if not row:
-                # Initialize window
                 conn.execute(
                     text("""
                         insert into public.rate_limits (student_id, submission_count, window_start_time)
-                        values (:sid, 0, :wstart)
+                        values (:sid, 0, now())
                     """),
-                    {"sid": sid, "wstart": now},
+                    {"sid": sid},
                 )
-                reset_time = (now + window).astimezone(timezone.utc)
-                return True, RATE_LIMIT_MAX_PER_HOUR, reset_time.strftime("%H:%M")
+                submission_count = 0
+                window_start = now_utc
+            else:
+                submission_count = int(row["submission_count"] or 0)
+                window_start = row["window_start_time"]
+                if isinstance(window_start, datetime):
+                    # Make timezone-aware in UTC
+                    if window_start.tzinfo is None:
+                        window_start = window_start.replace(tzinfo=timezone.utc)
+                    else:
+                        window_start = window_start.astimezone(timezone.utc)
+                else:
+                    window_start = now_utc
 
-            count = int(row["submission_count"] or 0)
-            wstart = row["window_start_time"]
-            if wstart.tzinfo is None:
-                wstart = wstart.replace(tzinfo=timezone.utc)
-
-            # Reset if expired
-            if now - wstart >= window:
+            elapsed = (now_utc - window_start).total_seconds()
+            if elapsed >= RATE_LIMIT_WINDOW_SECONDS:
+                # Reset window
                 conn.execute(
                     text("""
                         update public.rate_limits
-                        set submission_count = 0, window_start_time = :wstart
+                        set submission_count = 0,
+                            window_start_time = now()
                         where student_id = :sid
                     """),
-                    {"sid": sid, "wstart": now},
+                    {"sid": sid},
                 )
-                reset_time = (now + window).astimezone(timezone.utc)
-                return True, RATE_LIMIT_MAX_PER_HOUR, reset_time.strftime("%H:%M")
+                submission_count = 0
+                window_start = now_utc
 
-            remaining = RATE_LIMIT_MAX_PER_HOUR - count
-            reset_time = (wstart + window).astimezone(timezone.utc)
+            remaining = max(0, RATE_LIMIT_MAX - submission_count)
+            reset_time_utc = window_start + timedelta(seconds=RATE_LIMIT_WINDOW_SECONDS)
+            allowed = submission_count < RATE_LIMIT_MAX
+            reset_str = _format_reset_time(reset_time_utc)
 
-            if remaining <= 0:
-                return False, 0, reset_time.strftime("%H:%M")
-
-            return True, remaining, reset_time.strftime("%H:%M")
+            return allowed, remaining, reset_str
 
     except Exception as e:
-        # If rate-limit DB query fails, allow but log an error.
-        LOGGER.error(f"{_kv(area='rate_limit', student_id=sid)} check failed: {type(e).__name__}: {e}")
-        return True, RATE_LIMIT_MAX_PER_HOUR, ""
+        # Fail open (avoid blocking), but log for debugging
+        LOGGER.error(
+            "Rate limit check failed",
+            extra={"ctx": {"component": "rate_limit", "student_id": sid, "error": type(e).__name__}},
+        )
+        return True, RATE_LIMIT_MAX, ""
 
 
 def increment_rate_limit(student_id: str):
-    """Increment submission count, resetting window if needed."""
+    """
+    Increment submission count in current window.
+    Called immediately before an OpenAI call, so it limits API spend.
+    Teachers bypass.
+    """
+    if st.session_state.get("is_teacher", False):
+        return
+
     eng = get_db_engine()
     if eng is None:
         return
 
     ensure_rate_limits_table()
 
-    sid = _effective_student_id(student_id)
-    now = _utc_now()
-    window = timedelta(seconds=RATE_LIMIT_WINDOW_SECONDS)
-
+    sid = (student_id or "").strip() or f"anon_{st.session_state['anon_id']}"
     try:
         with eng.begin() as conn:
-            row = conn.execute(
+            # Ensure row exists
+            conn.execute(
                 text("""
-                    select student_id, submission_count, window_start_time
-                    from public.rate_limits
-                    where student_id = :sid
-                    for update
+                    insert into public.rate_limits (student_id, submission_count, window_start_time)
+                    values (:sid, 0, now())
+                    on conflict (student_id) do nothing
                 """),
                 {"sid": sid},
-            ).mappings().first()
-
-            if not row:
-                conn.execute(
-                    text("""
-                        insert into public.rate_limits (student_id, submission_count, window_start_time)
-                        values (:sid, 1, :wstart)
-                    """),
-                    {"sid": sid, "wstart": now},
-                )
-                return
-
-            count = int(row["submission_count"] or 0)
-            wstart = row["window_start_time"]
-            if wstart.tzinfo is None:
-                wstart = wstart.replace(tzinfo=timezone.utc)
-
-            if now - wstart >= window:
-                # New window starts now, count resets to 1
-                conn.execute(
-                    text("""
-                        update public.rate_limits
-                        set submission_count = 1, window_start_time = :wstart
-                        where student_id = :sid
-                    """),
-                    {"sid": sid, "wstart": now},
-                )
-            else:
-                conn.execute(
-                    text("""
-                        update public.rate_limits
-                        set submission_count = :cnt
-                        where student_id = :sid
-                    """),
-                    {"sid": sid, "cnt": count + 1},
-                )
-
+            )
+            # Increment
+            conn.execute(
+                text("""
+                    update public.rate_limits
+                    set submission_count = submission_count + 1
+                    where student_id = :sid
+                """),
+                {"sid": sid},
+            )
+        LOGGER.info("Rate limit incremented", extra={"ctx": {"component": "rate_limit", "student_id": sid}})
     except Exception as e:
-        LOGGER.error(f"{_kv(area='rate_limit', student_id=sid)} increment failed: {type(e).__name__}: {e}")
+        LOGGER.error(
+            "Rate limit increment failed",
+            extra={"ctx": {"component": "rate_limit", "student_id": sid, "error": type(e).__name__}},
+        )
 
 
 def insert_attempt(student_id: str, question_key: str, report: dict, mode: str):
@@ -492,7 +497,9 @@ def insert_attempt(student_id: str, question_key: str, report: dict, mode: str):
         return
     ensure_attempts_table()
 
-    sid = _effective_student_id(student_id)
+    sid = (student_id or "").strip()
+    if not sid:
+        sid = f"anon_{st.session_state['anon_id']}"
 
     m_awarded = int(report.get("marks_awarded", 0))
     m_max = int(report.get("max_marks", 1))
@@ -528,11 +535,17 @@ def insert_attempt(student_id: str, question_key: str, report: dict, mode: str):
                 "readback_markdown": rb_md if rb_md else None,
                 "readback_warnings": rb_warn
             })
-        st.session_state["db_last_error"] = None
-        LOGGER.info(f"{_kv(student_id=sid, question=question_key, mode=mode, marks=f'{m_awarded}/{m_max}')} Attempt inserted")
+        st.session_state["db_last_error"] = ""
+        LOGGER.info(
+            "Attempt inserted",
+            extra={"ctx": {"component": "db", "student_id": sid, "question": question_key, "mode": mode, "marks": f"{m_awarded}/{m_max}"}},
+        )
     except Exception as e:
         st.session_state["db_last_error"] = f"Insert Error: {type(e).__name__}: {e}"
-        LOGGER.error(f"{_kv(student_id=sid, question=question_key, mode=mode)} DB insert failed: {type(e).__name__}: {e}")
+        LOGGER.error(
+            "Attempt insert failed",
+            extra={"ctx": {"component": "db", "student_id": sid, "question": question_key, "mode": mode, "error": type(e).__name__}},
+        )
 
 
 def load_attempts_df(limit: int = 5000) -> pd.DataFrame:
@@ -559,7 +572,7 @@ def load_attempts_df(limit: int = 5000) -> pd.DataFrame:
         return df
     except Exception as e:
         st.session_state["db_last_error"] = f"Load Error: {type(e).__name__}: {e}"
-        LOGGER.error(f"{_kv(area='db')} Load attempts failed: {type(e).__name__}: {e}")
+        LOGGER.error("Load attempts failed", extra={"ctx": {"component": "db", "error": type(e).__name__}})
         return pd.DataFrame()
 
 # =========================
@@ -592,11 +605,11 @@ def ensure_custom_questions_table():
         with eng.begin() as conn:
             conn.execute(text(ddl))
         st.session_state["custom_table_ready"] = True
-        LOGGER.info(f"{_kv(area='db')} custom_questions table ready")
+        LOGGER.info("Custom questions table ready", extra={"ctx": {"component": "db", "table": "custom_questions_v1"}})
     except Exception as e:
         st.session_state["db_last_error"] = f"Custom Table Creation Error: {type(e).__name__}: {e}"
         st.session_state["custom_table_ready"] = False
-        LOGGER.error(f"{_kv(area='db')} custom_questions table creation failed: {type(e).__name__}: {e}")
+        LOGGER.error("Custom table ensure failed", extra={"ctx": {"component": "db", "error": type(e).__name__}})
 
 
 def insert_custom_question(created_by: str,
@@ -634,11 +647,14 @@ def insert_custom_question(created_by: str,
                 "question_text": (question_text or "").strip()[:5000],
                 "markscheme_text": (markscheme_text or "").strip()[:8000],
             })
-        LOGGER.info(f"{_kv(area='bank', assignment=assignment_name, question_label=question_label)} Custom question inserted")
+        LOGGER.info(
+            "Custom question metadata inserted",
+            extra={"ctx": {"component": "db", "table": "custom_questions_v1", "assignment": assignment_name, "label": question_label}},
+        )
         return True
     except Exception as e:
         st.session_state["db_last_error"] = f"Insert Custom Question Error: {type(e).__name__}: {e}"
-        LOGGER.error(f"{_kv(area='bank', assignment=assignment_name, question_label=question_label)} Insert failed: {type(e).__name__}: {e}")
+        LOGGER.error("Insert custom question failed", extra={"ctx": {"component": "db", "error": type(e).__name__}})
         return False
 
 
@@ -662,7 +678,7 @@ def load_custom_questions_df(limit: int = 2000) -> pd.DataFrame:
         return df
     except Exception as e:
         st.session_state["db_last_error"] = f"Load Custom Questions Error: {type(e).__name__}: {e}"
-        LOGGER.error(f"{_kv(area='bank')} Load custom questions failed: {type(e).__name__}: {e}")
+        LOGGER.error("Load custom questions failed", extra={"ctx": {"component": "db", "error": type(e).__name__}})
         return pd.DataFrame()
 
 
@@ -686,7 +702,7 @@ def load_custom_question_by_id(qid: int) -> dict:
         return dict(row) if row else {}
     except Exception as e:
         st.session_state["db_last_error"] = f"Load Custom Question Error: {type(e).__name__}: {e}"
-        LOGGER.error(f"{_kv(area='bank', qid=qid)} Load question failed: {type(e).__name__}: {e}")
+        LOGGER.error("Load custom question by id failed", extra={"ctx": {"component": "db", "error": type(e).__name__}})
         return {}
 
 # =========================
@@ -703,7 +719,6 @@ def upload_to_storage(path: str, file_bytes: bytes, content_type: str) -> bool:
     sb = get_supabase_client()
     if sb is None:
         st.session_state["db_last_error"] = "Supabase Storage not configured."
-        LOGGER.error(f"{_kv(area='storage')} upload failed: supabase not configured")
         return False
     try:
         res = sb.storage.from_(STORAGE_BUCKET).upload(
@@ -718,11 +733,18 @@ def upload_to_storage(path: str, file_bytes: bytes, content_type: str) -> bool:
             err = res.get("error")
         if err:
             raise RuntimeError(str(err))
-        LOGGER.info(f"{_kv(area='storage', path=path, bytes=len(file_bytes))} Uploaded")
+
+        LOGGER.info(
+            "Storage upload success",
+            extra={"ctx": {"component": "storage", "bucket": STORAGE_BUCKET, "path": path, "bytes": len(file_bytes)}},
+        )
         return True
     except Exception as e:
         st.session_state["db_last_error"] = f"Storage Upload Error: {type(e).__name__}: {e}"
-        LOGGER.error(f"{_kv(area='storage', path=path)} upload failed: {type(e).__name__}: {e}")
+        LOGGER.error(
+            "Storage upload failed",
+            extra={"ctx": {"component": "storage", "bucket": STORAGE_BUCKET, "path": path, "error": type(e).__name__}},
+        )
         return False
 
 
@@ -733,17 +755,17 @@ def download_from_storage(path: str) -> bytes:
     try:
         res = sb.storage.from_(STORAGE_BUCKET).download(path)
         if isinstance(res, (bytes, bytearray)):
-            b = bytes(res)
-        elif hasattr(res, "data") and res.data is not None and isinstance(res.data, (bytes, bytearray)):
-            b = bytes(res.data)
-        else:
-            b = b""
-        if b:
-            LOGGER.info(f"{_kv(area='storage', path=path, bytes=len(b))} Downloaded")
-        return b
+            return bytes(res)
+        if hasattr(res, "data") and res.data is not None:
+            if isinstance(res.data, (bytes, bytearray)):
+                return bytes(res.data)
+        return b""
     except Exception as e:
         st.session_state["db_last_error"] = f"Storage Download Error: {type(e).__name__}: {e}"
-        LOGGER.error(f"{_kv(area='storage', path=path)} download failed: {type(e).__name__}: {e}")
+        LOGGER.error(
+            "Storage download failed",
+            extra={"ctx": {"component": "storage", "bucket": STORAGE_BUCKET, "path": path, "error": type(e).__name__}},
+        )
         return b""
 
 
@@ -754,163 +776,10 @@ def bytes_to_pil(img_bytes: bytes) -> Image.Image:
     return img
 
 # =========================
-# 3) FILE SIZE VALIDATION + COMPRESSION
-# =========================
-def validate_image_file(file_bytes: bytes, max_mb: float, purpose: str) -> tuple[bool, str]:
-    """
-    Validate an image (bytes) BEFORE uploading.
-    Checks:
-      - size <= max_mb (allow slight oversize if compressible)
-      - dimensions <= MAX_DIM_PX x MAX_DIM_PX
-      - is a valid image
-    Returns (ok, message). If not ok, message is user-friendly.
-    """
-    if not file_bytes:
-        return False, f"{purpose}: empty file."
-
-    size_mb = len(file_bytes) / (1024 * 1024)
-    try:
-        img = Image.open(io.BytesIO(file_bytes))
-        img.load()
-    except Exception:
-        return False, f"{purpose}: invalid image file."
-
-    w, h = img.size
-    if w > MAX_DIM_PX or h > MAX_DIM_PX:
-        return False, f"Image dimensions too large ({w}x{h}). Max is {MAX_DIM_PX}x{MAX_DIM_PX}."
-
-    # If within limit, ok
-    if size_mb <= max_mb:
-        return True, ""
-
-    # Slightly over is allowed if we can compress (handled elsewhere)
-    return False, f"Image too large ({size_mb:.1f}MB). Please use an image under {max_mb:.0f}MB."
-
-
-def compress_image_if_needed(img: Image.Image, max_kb: int) -> Image.Image:
-    """
-    Returns a (possibly resized) PIL Image that is more likely to encode under max_kb.
-    This function only changes dimensions (and mode). Actual byte size depends on encoding.
-    """
-    # Always work in RGB for predictable compression
-    if img.mode == "RGBA":
-        bg = Image.new("RGB", img.size, (255, 255, 255))
-        bg.paste(img, mask=img.split()[3])
-        img = bg
-    elif img.mode != "RGB":
-        img = img.convert("RGB")
-
-    # Downscale progressively until likely under max_kb when JPEG-encoded.
-    # (Heuristic: keep shrinking by 10% each step, with a lower bound.)
-    w, h = img.size
-    min_side = 600  # avoid destroying legibility
-    for _ in range(10):
-        est_pixels = w * h
-        # Rough heuristic: huge images are usually the problem
-        if est_pixels <= 1_500_000:
-            break
-        w = int(w * 0.9)
-        h = int(h * 0.9)
-        if w < min_side or h < min_side:
-            break
-        img = img.resize((w, h))
-    return img
-
-
-def _encode_jpeg_under_kb(img: Image.Image, max_kb: int) -> tuple[bytes, str]:
-    """
-    Encode to JPEG, reducing quality and/or size until under max_kb.
-    Returns (bytes, content_type).
-    """
-    img_work = compress_image_if_needed(img, max_kb=max_kb)
-
-    # Try a few qualities
-    for q in [85, 80, 75, 70, 65, 60]:
-        buf = io.BytesIO()
-        img_work.save(buf, format="JPEG", quality=q, optimize=True, progressive=True)
-        data = buf.getvalue()
-        if len(data) <= max_kb * 1024:
-            return data, "image/jpeg"
-
-    # If still too large, downscale further
-    w, h = img_work.size
-    for _ in range(6):
-        w = int(w * 0.85)
-        h = int(h * 0.85)
-        if w < 500 or h < 500:
-            break
-        img_work = img_work.resize((w, h))
-        buf = io.BytesIO()
-        img_work.save(buf, format="JPEG", quality=60, optimize=True, progressive=True)
-        data = buf.getvalue()
-        if len(data) <= max_kb * 1024:
-            return data, "image/jpeg"
-
-    # Return best-effort (may still be large)
-    return data, "image/jpeg"
-
-
-def _validate_and_maybe_compress_bytes(file_bytes: bytes, max_mb: float, purpose: str, allow_compress: bool = True) -> tuple[bool, str, bytes, str]:
-    """
-    Returns (ok, message, out_bytes, out_content_type).
-    - If slightly over limit and allow_compress, compress automatically.
-    """
-    ok, msg = validate_image_file(file_bytes, max_mb=max_mb, purpose=purpose)
-    if ok:
-        # Keep original bytes, content-type guessed later
-        return True, "", file_bytes, ""
-
-    # If not ok due to size, we may compress.
-    size_mb = len(file_bytes) / (1024 * 1024)
-    if (not allow_compress) or (size_mb > max_mb * 1.25):
-        # Too large to "slightly compress"
-        return False, msg, b"", ""
-
-    # Try compressing
-    try:
-        img = Image.open(io.BytesIO(file_bytes))
-        img.load()
-        target_kb = int(max_mb * 1024)
-
-        before_kb = len(file_bytes) / 1024
-        out_bytes, out_ct = _encode_jpeg_under_kb(img, max_kb=target_kb)
-        after_kb = len(out_bytes) / 1024
-
-        if len(out_bytes) <= target_kb * 1024:
-            LOGGER.warning(f"{_kv(area='image', purpose=purpose)} compression applied (KB {before_kb:.0f} -> {after_kb:.0f})")
-            return True, f"Compressed {purpose.lower()} to fit size limit.", out_bytes, out_ct
-
-        # Still too big
-        return False, f"Image too large ({size_mb:.1f}MB). Please use an image under {max_mb:.0f}MB.", b"", ""
-
-    except Exception as e:
-        LOGGER.error(f"{_kv(area='image', purpose=purpose)} compression failed: {type(e).__name__}: {e}")
-        return False, msg, b"", ""
-
-
-def _guess_ct_from_name(name: str) -> str:
-    name = (name or "").lower()
-    if name.endswith(".png"):
-        return "image/png"
-    if name.endswith(".jpg") or name.endswith(".jpeg"):
-        return "image/jpeg"
-    return "application/octet-stream"
-
-
-def _human_mb(n_bytes: int) -> str:
-    return f"{(n_bytes / (1024 * 1024)):.1f}MB"
-
-
-# =========================
 # --- HELPER FUNCTIONS ---
 # =========================
 def encode_image(image_pil: Image.Image) -> str:
-    """
-    For OpenAI image input.
-    Keeps PNG but optimized. Canvas preprocessing below ensures <= 2MB.
-    """
     buffered = io.BytesIO()
-    # Use optimize for PNG; canvas flow further ensures size
     image_pil.save(buffered, format="PNG", optimize=True)
     return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
@@ -965,86 +834,191 @@ def preprocess_canvas_image(image_data: np.ndarray) -> Image.Image:
     return img
 
 
-def _ensure_canvas_under_limit(img: Image.Image, max_mb: float) -> Image.Image:
+# ============================================================
+# 3) FILE SIZE VALIDATION + COMPRESSION
+# ============================================================
+def _human_mb(num_bytes: int) -> str:
+    return f"{(num_bytes / (1024 * 1024)):.1f}MB"
+
+
+def validate_image_file(file_bytes: bytes, max_mb: float, purpose: str) -> Tuple[bool, str]:
     """
-    Ensure the preprocessed canvas image encodes under max_mb (after preprocessing).
-    If slightly over, downscale more.
+    Validate image bytes for size and dimension limits.
+    Returns (ok, message). If ok=True, message is empty.
     """
+    if not file_bytes:
+        return False, "No image data received."
+
+    size_bytes = len(file_bytes)
     max_bytes = int(max_mb * 1024 * 1024)
 
-    img_work = img
-    for _ in range(10):
-        buf = io.BytesIO()
-        img_work.save(buf, format="PNG", optimize=True)
-        b = buf.getvalue()
-        if len(b) <= max_bytes:
-            return img_work
+    # Dimension check (and basic image decode)
+    try:
+        img = Image.open(io.BytesIO(file_bytes))
+        w, h = img.size
+    except Exception:
+        return False, "Invalid image file. Please upload a valid PNG/JPG."
 
-        # Too large, downscale further
-        w, h = img_work.size
-        w2 = int(w * 0.85)
-        h2 = int(h * 0.85)
-        if w2 < 400 or h2 < 400:
+    if w > MAX_DIM_PX or h > MAX_DIM_PX:
+        return False, f"Image dimensions too large ({w}x{h}). Max allowed is {MAX_DIM_PX}x{MAX_DIM_PX}px."
+
+    if size_bytes <= max_bytes:
+        return True, ""
+
+    # Too large (compression may still rescue it, handled by caller)
+    return False, f"Image too large ({_human_mb(size_bytes)}). Please use an image under {max_mb:.0f}MB."
+
+
+def compress_image_if_needed(img: Image.Image, max_kb: int) -> Image.Image:
+    """
+    Best-effort compression by downscaling (keeps content readable and format-agnostic).
+    Note: file size depends on encoding; encoding is handled elsewhere.
+    """
+    if img is None:
+        return img
+
+    # Hard cap on dimensions first
+    w, h = img.size
+    if w > MAX_DIM_PX or h > MAX_DIM_PX:
+        scale = min(MAX_DIM_PX / w, MAX_DIM_PX / h)
+        img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))))
+        return img
+
+    # Gentle downscale if caller indicates we are close to the limit
+    # (We cannot know exact KB without encoding, so we do a conservative small shrink.)
+    if max_kb <= 0:
+        return img
+    return img
+
+
+def _encode_image_bytes(img: Image.Image, fmt: str, quality: int = 85) -> bytes:
+    buf = io.BytesIO()
+    if fmt.upper() == "JPEG":
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        img.save(buf, format="JPEG", quality=int(quality), optimize=True)
+    else:
+        # PNG
+        img.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
+
+def _compress_bytes_to_limit(
+    file_bytes: bytes,
+    max_mb: float,
+    purpose: str,
+    prefer_fmt: Optional[str] = None,
+) -> Tuple[bool, bytes, str, str]:
+    """
+    If slightly over limit, try compressing to under max_mb.
+    Returns (ok, out_bytes, content_type, message). If ok=False, message explains why.
+    """
+    max_bytes = int(max_mb * 1024 * 1024)
+    size_bytes = len(file_bytes)
+
+    # If hugely over, don't waste time
+    if size_bytes > int(max_bytes * 1.30):
+        return False, b"", "", f"Image too large ({_human_mb(size_bytes)}). Please use an image under {max_mb:.0f}MB."
+
+    try:
+        img = Image.open(io.BytesIO(file_bytes))
+        img.load()
+    except Exception:
+        return False, b"", "", "Invalid image file. Please upload a valid PNG/JPG."
+
+    w, h = img.size
+    if w > MAX_DIM_PX or h > MAX_DIM_PX:
+        return False, b"", "", f"Image dimensions too large ({w}x{h}). Max allowed is {MAX_DIM_PX}x{MAX_DIM_PX}px."
+
+    # Choose encoding strategy
+    # - If it's already JPEG, re-encode JPEG with reduced quality.
+    # - If PNG and large, switch to JPEG for better compression (screenshots).
+    in_fmt = (img.format or "").upper()
+    if prefer_fmt:
+        target_fmt = prefer_fmt.upper()
+    else:
+        target_fmt = "JPEG" if in_fmt in ("JPG", "JPEG") else "JPEG"
+
+    # Try iterative JPEG quality reduction
+    best_bytes = None
+    best_quality = None
+    for q in [85, 80, 75, 70, 65, 60, 55, 50]:
+        out = _encode_image_bytes(img, target_fmt, quality=q)
+        if len(out) <= max_bytes:
+            best_bytes = out
+            best_quality = q
             break
-        img_work = img_work.resize((w2, h2))
 
-    # If still too large, return last attempt (caller will block with error)
-    return img_work
+    if best_bytes is None:
+        # Last resort: small downscale then try again
+        w, h = img.size
+        scale = 0.9
+        for _ in range(4):
+            img2 = img.resize((max(1, int(w * scale)), max(1, int(h * scale))))
+            for q in [75, 70, 65, 60, 55, 50]:
+                out = _encode_image_bytes(img2, target_fmt, quality=q)
+                if len(out) <= max_bytes:
+                    best_bytes = out
+                    best_quality = q
+                    img = img2
+                    break
+            if best_bytes is not None:
+                break
+            scale *= 0.9
+
+    if best_bytes is None:
+        return False, b"", "", f"Image too large ({_human_mb(size_bytes)}) and could not be compressed under {max_mb:.0f}MB."
+
+    ct = "image/jpeg" if target_fmt == "JPEG" else "image/png"
+    LOGGER.warning(
+        "Image compression applied",
+        extra={"ctx": {"component": "image", "purpose": purpose, "from": _human_mb(size_bytes), "to": _human_mb(len(best_bytes)), "quality": best_quality}},
+    )
+    return True, best_bytes, ct, ""
 
 
-# =========================
-# --- 2) BETTER PROGRESS INDICATORS ---
-# =========================
-def run_with_progress(fn, *,
-                      status_label: str,
-                      typical_range: str,
-                      still_working_after_s: float = 15.0,
-                      estimated_total_s: float = 10.0):
+# ============================================================
+# 2) BETTER PROGRESS INDICATORS (with estimated time)
+# ============================================================
+def _run_ai_with_progress(task_fn, mode: str, ctx: dict, typical_range: str, est_seconds: float) -> dict:
     """
-    Run a blocking function in a worker thread and update Streamlit UI:
-      - status box
-      - progress bar (estimate-based)
-      - "Still working..." after threshold
-      - brief completion message
-
-    Returns (result, duration_s).
+    Runs task_fn() in a background thread and updates:
+    - st.status() messages
+    - st.progress() bar
+    - "Still working..." message if > 15s
+    Logs actual duration.
     """
-    start = time.time()
-    progress = st.progress(0.0)
+    status_label = f"Marking… (typically {typical_range})" if mode == "text" else f"Analyzing handwriting… (typically {typical_range})"
 
-    with st.status(f"{status_label} (typically {typical_range})", expanded=True) as status:
-        status.write("Starting analysis...")
-        showed_slow_msg = False
+    with st.status(status_label, expanded=True) as status:
+        progress = st.progress(0)
+        start = time.monotonic()
+        still_working_shown = False
 
         with ThreadPoolExecutor(max_workers=1) as ex:
-            fut = ex.submit(fn)
+            fut = ex.submit(task_fn)
 
-            # Poll until complete so we can update progress UI
-            while True:
-                if fut.done():
-                    break
+            while not fut.done():
+                elapsed = time.monotonic() - start
 
-                elapsed = time.time() - start
-                # estimate-based fill: asymptotically approaches 95%
-                p = min(0.95, elapsed / max(estimated_total_s, 1e-6))
-                progress.progress(float(p))
+                # Estimate-based progress
+                frac = min(0.95, max(0.02, elapsed / max(1e-6, est_seconds)))
+                progress.progress(int(frac * 100))
 
-                if (elapsed > still_working_after_s) and not showed_slow_msg:
-                    status.write("Still working... (complex answer detected)")
-                    showed_slow_msg = True
+                if elapsed > 15 and not still_working_shown:
+                    status.update(label="Still working… (complex answer detected)", state="running", expanded=True)
+                    still_working_shown = True
 
                 time.sleep(0.12)
 
-            # Collect result (no long blocking now)
-            result = fut.result()
+            report = fut.result()
 
-        duration = time.time() - start
-        progress.progress(1.0)
+        elapsed = time.monotonic() - start
+        progress.progress(100)
         status.update(label="✓ Analysis complete!", state="complete", expanded=False)
 
-    # Small post-complete message (non-blocking)
-    st.toast("✓ Analysis complete!", icon="✅")
-    return result, duration
+    LOGGER.info("OpenAI marking completed", extra={"ctx": {**ctx, "duration_s": f"{elapsed:.2f}"}})
+    return report
 
 
 # =========================
@@ -1136,7 +1110,7 @@ Max Marks: {max_marks}
         }
 
     except Exception as e:
-        LOGGER.error(f"{_kv(area='openai')} Marking error: {type(e).__name__}: {e}")
+        LOGGER.error("Marking error", extra={"ctx": {"component": "openai", "error": type(e).__name__}})
         return {
             "readback_type": "",
             "readback_markdown": "",
@@ -1238,7 +1212,7 @@ Max Marks: {int(max_marks)}
         }
 
     except Exception as e:
-        LOGGER.error(f"{_kv(area='openai')} Custom marking error: {type(e).__name__}: {e}")
+        LOGGER.error("Custom marking error", extra={"ctx": {"component": "openai", "error": type(e).__name__}})
         return {
             "readback_type": "",
             "readback_markdown": "",
@@ -1280,9 +1254,9 @@ def render_report(report: dict):
             st.write(f"- {n}")
 
 
-# ============================================================
+# =========================
 #  MAIN APP UI
-# ============================================================
+# =========================
 tab_student, tab_teacher, tab_bank = st.tabs(["🧑‍🎓 Student", "🔒 Teacher Dashboard", "📚 Question Bank"])
 
 # -------------------------
@@ -1327,19 +1301,17 @@ with tab_student:
             help="Optional. Leave blank to submit anonymously."
         )
 
-        # NEW: Teacher bypass (optional, minimal UI)
-        with st.expander("Teacher override (bypass rate limits)", expanded=False):
-            teacher_override_pw = st.text_input("Teacher password", type="password", key="teacher_override_pw")
-            is_teacher_override = bool(teacher_override_pw and teacher_override_pw == st.secrets.get("TEACHER_PASSWORD", ""))
+        effective_sid = _effective_student_id(student_id)
+        allowed, remaining, reset_time_str = check_rate_limit(effective_sid)
 
-        eff_sid = _effective_student_id(student_id)
-
-        # NEW: rate-limit indicator
-        if db_ready() and not is_teacher_override:
-            allowed_now, remaining_now, reset_at = check_rate_limit(student_id)
-            st.caption(f"{remaining_now}/{RATE_LIMIT_MAX_PER_HOUR} attempts remaining this hour" + (f" (resets at {reset_at})" if reset_at else ""))
-        elif is_teacher_override:
-            st.caption("Teacher override enabled. Rate limit bypassed.")
+        # Visual indicator: remaining attempts
+        if st.session_state.get("is_teacher", False):
+            st.caption("Teacher mode: rate limits bypassed.")
+        else:
+            if db_ready():
+                st.caption(f"{remaining}/{RATE_LIMIT_MAX} attempts remaining this hour.")
+            else:
+                st.caption("Rate limit indicator unavailable (database not ready).")
 
         if not selected_is_custom:
             q_key = st.selectbox("Select Topic:", list(QUESTIONS.keys()))
@@ -1428,28 +1400,27 @@ with tab_student:
             answer = st.text_area("Type your working:", height=200, placeholder="Enter your answer here...")
 
             if st.button("Submit Text", type="primary", disabled=not AI_READY):
+                sid = _effective_student_id(student_id)
+                ctx = {"student_id": sid, "question": q_key or "", "mode": "text"}
+
                 if not answer.strip():
                     st.toast("Please type an answer first.", icon="⚠️")
                 else:
-                    mode = "text"
+                    # Rate limit check BEFORE calling OpenAI
+                    allowed_now, remaining_now, reset_str = check_rate_limit(sid)
+                    if not allowed_now:
+                        msg = f"You’ve reached the limit of {RATE_LIMIT_MAX} submissions per hour. Please try again at {reset_str}."
+                        st.error(msg)
+                        LOGGER.warning("Rate limit reached", extra={"ctx": {**ctx, "remaining": remaining_now}})
+                    else:
+                        # Increment immediately before API call (limits spend)
+                        increment_rate_limit(sid)
 
-                    # 1) Rate limit check (teachers bypass)
-                    if not is_teacher_override:
-                        allowed, remaining, reset_at = check_rate_limit(student_id)
-                        if not allowed:
-                            LOGGER.warning(f"{_kv(student_id=eff_sid, question=q_key, mode=mode)} Rate limit reached (10/10 in window)")
-                            st.error(f"You’ve reached the limit of 10 submissions per hour. Please try again at {reset_at}.")
-                            st.stop()
+                        LOGGER.info("Submission received", extra={"ctx": ctx})
 
-                        # increment before the API call to protect costs even if user refreshes
-                        increment_rate_limit(student_id)
-
-                    LOGGER.info(f"{_kv(student_id=eff_sid, question=q_key, mode=mode)} Submission received")
-
-                    def _do_mark():
-                        if not selected_is_custom:
-                            return get_gpt_feedback(answer, q_data, is_image=False)
-                        else:
+                        def task():
+                            if not selected_is_custom:
+                                return get_gpt_feedback(answer, q_data, is_image=False)
                             if not custom_row or question_img is None:
                                 return {
                                     "readback_type": "",
@@ -1483,22 +1454,21 @@ with tab_student:
                                 is_student_image=False
                             )
 
-                    report, duration = run_with_progress(
-                        _do_mark,
-                        status_label="Marking...",
-                        typical_range="5-10 seconds",
-                        still_working_after_s=15.0,
-                        estimated_total_s=8.0
-                    )
+                        # Better progress UI
+                        st.session_state["feedback"] = _run_ai_with_progress(
+                            task_fn=task,
+                            mode="text",
+                            ctx=ctx,
+                            typical_range="5-10 seconds",
+                            est_seconds=9.0
+                        )
 
-                    st.session_state["feedback"] = report
+                        # Log marks
+                        rep = st.session_state["feedback"] or {}
+                        LOGGER.info("Feedback generated", extra={"ctx": {**ctx, "marks": f"{rep.get('marks_awarded', 0)}/{rep.get('max_marks', 0)}"}})
 
-                    LOGGER.info(f"{_kv(student_id=eff_sid, question=q_key, mode=mode, duration=f'{duration:.1f}s')} OpenAI marking completed")
-                    LOGGER.info(
-    f"{_kv(student_id=eff_sid, question=q_key, mode=mode, marks=f'{report.get(\"marks_awarded\",0)}/{report.get(\"max_marks\",0)}')} Feedback generated"
-
-                    if db_ready() and q_key:
-                        insert_attempt(student_id, q_key, st.session_state["feedback"], mode=mode)
+                        if db_ready() and q_key:
+                            insert_attempt(student_id, q_key, st.session_state["feedback"], mode="text")
 
         # -------------------------
         # Write Answer (Canvas)
@@ -1530,90 +1500,93 @@ with tab_student:
             )
 
             if st.button("Submit Writing", type="primary", disabled=not AI_READY):
-                mode = "writing"
+                sid = _effective_student_id(student_id)
+                ctx = {"student_id": sid, "question": q_key or "", "mode": "writing"}
 
                 if canvas_result.image_data is None or not canvas_has_ink(canvas_result.image_data):
                     st.toast("Canvas is empty!", icon="⚠️")
                 else:
-                    # 3) Canvas preprocessing + size validation BEFORE any upload / AI usage
-                    img_for_ai = preprocess_canvas_image(canvas_result.image_data)
-                    img_for_ai = _ensure_canvas_under_limit(img_for_ai, max_mb=MAX_CANVAS_MB)
+                    # Rate limit check BEFORE calling OpenAI
+                    allowed_now, remaining_now, reset_str = check_rate_limit(sid)
+                    if not allowed_now:
+                        msg = f"You’ve reached the limit of {RATE_LIMIT_MAX} submissions per hour. Please try again at {reset_str}."
+                        st.error(msg)
+                        LOGGER.warning("Rate limit reached", extra={"ctx": {**ctx, "remaining": remaining_now}})
+                    else:
+                        # Preprocess image
+                        img_for_ai = preprocess_canvas_image(canvas_result.image_data)
 
-                    # Validate size after preprocessing (hard block if still too large)
-                    buf_chk = io.BytesIO()
-                    img_for_ai.save(buf_chk, format="PNG", optimize=True)
-                    canvas_bytes = buf_chk.getvalue()
-                    if len(canvas_bytes) > int(MAX_CANVAS_MB * 1024 * 1024):
-                        LOGGER.warning(f"{_kv(student_id=eff_sid, question=q_key, mode=mode)} Canvas image too large after preprocessing ({_human_mb(len(canvas_bytes))})")
-                        st.error(f"Image too large ({_human_mb(len(canvas_bytes))}). Please write less densely or use a smaller canvas.")
-                        st.stop()
+                        # Validate canvas size after preprocessing (and compress if needed)
+                        # Encode to JPEG to control size and reduce cost when sending to the model.
+                        canvas_bytes = _encode_image_bytes(img_for_ai, "JPEG", quality=80)
+                        ok_canvas, msg_canvas = validate_image_file(canvas_bytes, CANVAS_MAX_MB, "canvas")
+                        if not ok_canvas:
+                            # Try compress if slightly over
+                            okc, outb, outct, err = _compress_bytes_to_limit(
+                                canvas_bytes, CANVAS_MAX_MB, purpose="canvas", prefer_fmt="JPEG"
+                            )
+                            if not okc:
+                                st.error(err or msg_canvas)
+                                LOGGER.warning("Canvas validation failed", extra={"ctx": {**ctx, "reason": err or msg_canvas}})
+                                st.stop()
+                            # Re-load back to PIL for the existing encode_image path (PNG base64)
+                            img_for_ai = Image.open(io.BytesIO(outb)).convert("RGB")
 
-                    # 1) Rate limit check (teachers bypass)
-                    if not is_teacher_override:
-                        allowed, remaining, reset_at = check_rate_limit(student_id)
-                        if not allowed:
-                            LOGGER.warning(f"{_kv(student_id=eff_sid, question=q_key, mode=mode)} Rate limit reached (10/10 in window)")
-                            st.error(f"You’ve reached the limit of 10 submissions per hour. Please try again at {reset_at}.")
-                            st.stop()
+                        # Increment immediately before API call (limits spend)
+                        increment_rate_limit(sid)
 
-                        increment_rate_limit(student_id)
+                        LOGGER.info("Submission received", extra={"ctx": ctx})
 
-                    LOGGER.info(f"{_kv(student_id=eff_sid, question=q_key, mode=mode)} Submission received")
+                        def task():
+                            if not selected_is_custom:
+                                return get_gpt_feedback(img_for_ai, q_data, is_image=True)
+                            if not custom_row or question_img is None:
+                                return {
+                                    "readback_type": "",
+                                    "readback_markdown": "",
+                                    "readback_warnings": [],
+                                    "marks_awarded": 0,
+                                    "max_marks": int(max_marks or 1),
+                                    "summary": "Custom question not ready (missing images).",
+                                    "feedback_points": ["Please inform your teacher.", "Question image could not be loaded."],
+                                    "next_steps": []
+                                }
+                            ms_path = st.session_state.get("cached_ms_path") or custom_row.get("markscheme_image_path")
+                            ms_bytes = download_from_storage(ms_path) if ms_path else b""
+                            if not ms_bytes:
+                                return {
+                                    "readback_type": "",
+                                    "readback_markdown": "",
+                                    "readback_warnings": [],
+                                    "marks_awarded": 0,
+                                    "max_marks": int(max_marks or 1),
+                                    "summary": "Mark scheme image missing.",
+                                    "feedback_points": ["Please inform your teacher."],
+                                    "next_steps": []
+                                }
+                            ms_img = bytes_to_pil(ms_bytes)
+                            return get_gpt_feedback_custom(
+                                student_answer=img_for_ai,
+                                question_img=question_img,
+                                markscheme_img=ms_img,
+                                max_marks=max_marks,
+                                is_student_image=True
+                            )
 
-                    def _do_mark_canvas():
-                        if not selected_is_custom:
-                            return get_gpt_feedback(img_for_ai, q_data, is_image=True)
-
-                        if not custom_row or question_img is None:
-                            return {
-                                "readback_type": "",
-                                "readback_markdown": "",
-                                "readback_warnings": [],
-                                "marks_awarded": 0,
-                                "max_marks": int(max_marks or 1),
-                                "summary": "Custom question not ready (missing images).",
-                                "feedback_points": ["Please inform your teacher.", "Question image could not be loaded."],
-                                "next_steps": []
-                            }
-
-                        ms_path = st.session_state.get("cached_ms_path") or custom_row.get("markscheme_image_path")
-                        ms_bytes = download_from_storage(ms_path) if ms_path else b""
-                        if not ms_bytes:
-                            return {
-                                "readback_type": "",
-                                "readback_markdown": "",
-                                "readback_warnings": [],
-                                "marks_awarded": 0,
-                                "max_marks": int(max_marks or 1),
-                                "summary": "Mark scheme image missing.",
-                                "feedback_points": ["Please inform your teacher."],
-                                "next_steps": []
-                            }
-
-                        ms_img = bytes_to_pil(ms_bytes)
-                        return get_gpt_feedback_custom(
-                            student_answer=img_for_ai,
-                            question_img=question_img,
-                            markscheme_img=ms_img,
-                            max_marks=max_marks,
-                            is_student_image=True
+                        # Better progress UI
+                        st.session_state["feedback"] = _run_ai_with_progress(
+                            task_fn=task,
+                            mode="writing",
+                            ctx=ctx,
+                            typical_range="8-15 seconds",
+                            est_seconds=13.0
                         )
 
-                    report, duration = run_with_progress(
-                        _do_mark_canvas,
-                        status_label="Analyzing handwriting...",
-                        typical_range="8-15 seconds",
-                        still_working_after_s=15.0,
-                        estimated_total_s=12.0
-                    )
+                        rep = st.session_state["feedback"] or {}
+                        LOGGER.info("Feedback generated", extra={"ctx": {**ctx, "marks": f"{rep.get('marks_awarded', 0)}/{rep.get('max_marks', 0)}"}})
 
-                    st.session_state["feedback"] = report
-
-                    LOGGER.info(f"{_kv(student_id=eff_sid, question=q_key, mode=mode, duration=f'{duration:.1f}s')} OpenAI marking completed")
-                    LOGGER.info(f"{_kv(student_id=eff_sid, question=q_key, mode=mode, marks=f'{report.get('marks_awarded',0)}/{report.get('max_marks',0)')} Feedback generated")
-
-                    if db_ready() and q_key:
-                        insert_attempt(student_id, q_key, st.session_state["feedback"], mode=mode)
+                        if db_ready() and q_key:
+                            insert_attempt(student_id, q_key, st.session_state["feedback"], mode="writing")
 
     with col2:
         st.subheader("👨‍🏫 Report")
@@ -1638,8 +1611,6 @@ with tab_teacher:
             _cached_engine.clear()
             st.session_state["db_table_ready"] = False
             st.session_state["custom_table_ready"] = False
-            st.session_state["rate_table_ready"] = False
-            LOGGER.info(f"{_kv(area='db')} reconnect requested")
             st.rerun()
         if st.session_state.get("db_last_error"):
             st.write("Last DB error:")
@@ -1656,9 +1627,11 @@ with tab_teacher:
     else:
         teacher_pw = st.text_input("Teacher password", type="password")
         if teacher_pw and teacher_pw == st.secrets.get("TEACHER_PASSWORD", ""):
-            with st.status("Loading class data...", expanded=False) as status:
+            # Mark teacher authenticated for this session (bypass rate limits)
+            st.session_state["is_teacher"] = True
+
+            with st.status("Loading class data…", expanded=False):
                 df = load_attempts_df(limit=5000)
-                status.update(label="✓ Loaded", state="complete")
 
             if st.session_state.get("db_last_error"):
                 st.error(f"Database Error: {st.session_state['db_last_error']}")
@@ -1708,8 +1681,6 @@ with tab_bank:
             _cached_engine.clear()
             st.session_state["db_table_ready"] = False
             st.session_state["custom_table_ready"] = False
-            st.session_state["rate_table_ready"] = False
-            LOGGER.info(f"{_kv(area='db')} reconnect requested (bank)")
             st.rerun()
         if st.session_state.get("db_last_error"):
             st.write("Last DB error:")
@@ -1725,6 +1696,9 @@ with tab_bank:
         if not (teacher_pw2 and teacher_pw2 == st.secrets.get("TEACHER_PASSWORD", "")):
             st.caption("Enter the teacher password to upload/manage questions.")
         else:
+            # Mark teacher authenticated for this session (bypass rate limits)
+            st.session_state["is_teacher"] = True
+
             ensure_custom_questions_table()
 
             with st.form("upload_q_form", clear_on_submit=True):
@@ -1754,40 +1728,48 @@ with tab_bank:
                     qlabel_slug = slugify(question_label)
                     token = pysecrets.token_hex(6)
 
-                    q_bytes_in = q_file.getvalue()
-                    ms_bytes_in = ms_file.getvalue()
+                    q_bytes_raw = q_file.getvalue()
+                    ms_bytes_raw = ms_file.getvalue()
 
-                    # 3) Validate and (optionally) compress BEFORE uploading
-                    okq, msgq, q_bytes_out, q_ct_out = _validate_and_maybe_compress_bytes(
-                        q_bytes_in, max_mb=MAX_Q_IMG_MB, purpose="Question image", allow_compress=True
-                    )
-                    if not okq:
-                        st.error(msgq)
-                        LOGGER.warning(f"{_kv(area='teacher_upload', purpose='question')} validation failed: {msgq}")
-                        st.stop()
+                    # Validate BEFORE upload
+                    ok_q, msg_q = validate_image_file(q_bytes_raw, QUESTION_MAX_MB, "question image")
+                    ok_ms, msg_ms = validate_image_file(ms_bytes_raw, MARKSCHEME_MAX_MB, "mark scheme image")
 
-                    okm, msgm, ms_bytes_out, ms_ct_out = _validate_and_maybe_compress_bytes(
-                        ms_bytes_in, max_mb=MAX_MS_IMG_MB, purpose="Mark scheme image", allow_compress=True
-                    )
-                    if not okm:
-                        st.error(msgm)
-                        LOGGER.warning(f"{_kv(area='teacher_upload', purpose='markscheme')} validation failed: {msgm}")
-                        st.stop()
+                    if not ok_q:
+                        # Try compression if slightly over
+                        okc, q_bytes, q_ct, err = _compress_bytes_to_limit(q_bytes_raw, QUESTION_MAX_MB, purpose="question image")
+                        if not okc:
+                            st.error(err or msg_q)
+                            LOGGER.error("Teacher upload rejected (question image)", extra={"ctx": {"component": "teacher_upload", "reason": err or msg_q}})
+                            st.stop()
+                    else:
+                        q_bytes = q_bytes_raw
+                        q_ct = "image/png" if (q_file.name or "").lower().endswith(".png") else "image/jpeg"
 
-                    # Content-type: keep original if not re-encoded; else use new
-                    q_ct = q_ct_out or _guess_ct_from_name(q_file.name)
-                    ms_ct = ms_ct_out or _guess_ct_from_name(ms_file.name)
+                    if not ok_ms:
+                        okc, ms_bytes, ms_ct, err = _compress_bytes_to_limit(ms_bytes_raw, MARKSCHEME_MAX_MB, purpose="mark scheme image")
+                        if not okc:
+                            st.error(err or msg_ms)
+                            LOGGER.error("Teacher upload rejected (mark scheme image)", extra={"ctx": {"component": "teacher_upload", "reason": err or msg_ms}})
+                            st.stop()
+                    else:
+                        ms_bytes = ms_bytes_raw
+                        ms_ct = "image/png" if (ms_file.name or "").lower().endswith(".png") else "image/jpeg"
 
-                    # Choose file extension consistent with content-type
+                    # Pick extension based on content type (so storage paths match reality)
                     q_ext = ".jpg" if q_ct == "image/jpeg" else ".png"
                     ms_ext = ".jpg" if ms_ct == "image/jpeg" else ".png"
 
                     q_path = f"{assignment_slug}/{token}/{qlabel_slug}_question{q_ext}"
                     ms_path = f"{assignment_slug}/{token}/{qlabel_slug}_markscheme{ms_ext}"
 
-                    # Upload
-                    ok1 = upload_to_storage(q_path, q_bytes_out, q_ct)
-                    ok2 = upload_to_storage(ms_path, ms_bytes_out, ms_ct)
+                    LOGGER.info(
+                        "Teacher upload starting",
+                        extra={"ctx": {"component": "teacher_upload", "assignment": assignment_name, "label": question_label}},
+                    )
+
+                    ok1 = upload_to_storage(q_path, q_bytes, q_ct)
+                    ok2 = upload_to_storage(ms_path, ms_bytes, ms_ct)
 
                     tags = [t.strip() for t in (tags_str or "").split(",") if t.strip()]
 
@@ -1807,13 +1789,10 @@ with tab_bank:
                             st.session_state["cached_dfq"] = None
                             st.session_state["cached_labels_map_key"] = None
                             st.success("Saved. This question is now available under 'Teacher Uploads' in the Student tab.")
-                            LOGGER.info(f"{_kv(area='teacher_upload', assignment=assignment_name, question_label=question_label)} Saved question bank entry")
                         else:
                             st.error("Uploaded images, but failed to save metadata to DB. Check errors below.")
-                            LOGGER.error(f"{_kv(area='teacher_upload')} Uploaded images but DB insert failed")
                     else:
                         st.error("Failed to upload one or both images to Supabase Storage. Check errors below.")
-                        LOGGER.error(f"{_kv(area='teacher_upload')} Image upload failed")
 
             st.write("")
             st.write("### Recent uploaded questions")
