@@ -156,6 +156,10 @@ def _normalize_db_url(db_url: str) -> str:
     return u
 
 @st.cache_resource
+def _cached_engine(url: str):
+    # Cache only successful engine creation by keying on the URL.
+    return create_engine(url, pool_pre_ping=True)
+
 def get_db_engine():
     raw_url = st.secrets.get("DATABASE_URL", "")
     url = _normalize_db_url(raw_url)
@@ -164,9 +168,10 @@ def get_db_engine():
     if not get_db_driver_type():
         return None
     try:
-        return create_engine(url, pool_pre_ping=True)
+        return _cached_engine(url)
     except Exception as e:
-        st.write(f"DB Engine Error: {e}")
+        # Do not cache failures forever, so we do not store None inside cache_resource.
+        st.session_state["db_last_error"] = f"DB Engine Error: {type(e).__name__}: {e}"
         return None
 
 def db_ready() -> bool:
@@ -194,7 +199,7 @@ def ensure_attempts_table():
     );
     """
 
-    # Lightweight, safe migration: add columns if missing (no data loss)
+    # Safe migration: add columns if missing (no data loss)
     ddl_alter = """
     alter table public.physics_attempts_v1
       add column if not exists readback_type text;
@@ -211,7 +216,7 @@ def ensure_attempts_table():
         st.session_state["db_last_error"] = ""
         st.session_state["db_table_ready"] = True
     except Exception as e:
-        st.session_state["db_last_error"] = f"Table Creation Error: {e}"
+        st.session_state["db_last_error"] = f"Table Creation Error: {type(e).__name__}: {e}"
         st.session_state["db_table_ready"] = False
 
 def insert_attempt(student_id: str, question_key: str, report: dict, mode: str):
@@ -260,7 +265,7 @@ def insert_attempt(student_id: str, question_key: str, report: dict, mode: str):
             })
         st.session_state["db_last_error"] = None
     except Exception as e:
-        st.session_state["db_last_error"] = f"Insert Error: {e}"
+        st.session_state["db_last_error"] = f"Insert Error: {type(e).__name__}: {e}"
 
 def load_attempts_df(limit: int = 5000) -> pd.DataFrame:
     eng = get_db_engine()
@@ -285,7 +290,7 @@ def load_attempts_df(limit: int = 5000) -> pd.DataFrame:
             df["max_marks"] = pd.to_numeric(df["max_marks"], errors="coerce").fillna(0).astype(int)
         return df
     except Exception as e:
-        st.session_state["db_last_error"] = f"Load Error: {e}"
+        st.session_state["db_last_error"] = f"Load Error: {type(e).__name__}: {e}"
         return pd.DataFrame()
 
 # =========================
@@ -319,7 +324,7 @@ def ensure_custom_questions_table():
             conn.execute(text(ddl))
         st.session_state["custom_table_ready"] = True
     except Exception as e:
-        st.session_state["db_last_error"] = f"Custom Table Creation Error: {e}"
+        st.session_state["db_last_error"] = f"Custom Table Creation Error: {type(e).__name__}: {e}"
         st.session_state["custom_table_ready"] = False
 
 def insert_custom_question(created_by: str,
@@ -359,7 +364,7 @@ def insert_custom_question(created_by: str,
             })
         return True
     except Exception as e:
-        st.session_state["db_last_error"] = f"Insert Custom Question Error: {e}"
+        st.session_state["db_last_error"] = f"Insert Custom Question Error: {type(e).__name__}: {e}"
         return False
 
 def load_custom_questions_df(limit: int = 2000) -> pd.DataFrame:
@@ -381,7 +386,7 @@ def load_custom_questions_df(limit: int = 2000) -> pd.DataFrame:
             )
         return df
     except Exception as e:
-        st.session_state["db_last_error"] = f"Load Custom Questions Error: {e}"
+        st.session_state["db_last_error"] = f"Load Custom Questions Error: {type(e).__name__}: {e}"
         return pd.DataFrame()
 
 def load_custom_question_by_id(qid: int) -> dict:
@@ -403,7 +408,7 @@ def load_custom_question_by_id(qid: int) -> dict:
             ).mappings().first()
         return dict(row) if row else {}
     except Exception as e:
-        st.session_state["db_last_error"] = f"Load Custom Question Error: {e}"
+        st.session_state["db_last_error"] = f"Load Custom Question Error: {type(e).__name__}: {e}"
         return {}
 
 # =========================
@@ -435,7 +440,7 @@ def upload_to_storage(path: str, file_bytes: bytes, content_type: str) -> bool:
             raise RuntimeError(str(err))
         return True
     except Exception as e:
-        st.session_state["db_last_error"] = f"Storage Upload Error: {e}"
+        st.session_state["db_last_error"] = f"Storage Upload Error: {type(e).__name__}: {e}"
         return False
 
 def download_from_storage(path: str) -> bytes:
@@ -451,7 +456,7 @@ def download_from_storage(path: str) -> bytes:
                 return bytes(res.data)
         return b""
     except Exception as e:
-        st.session_state["db_last_error"] = f"Storage Download Error: {e}"
+        st.session_state["db_last_error"] = f"Storage Download Error: {type(e).__name__}: {e}"
         return b""
 
 def bytes_to_pil(img_bytes: bytes) -> Image.Image:
@@ -520,11 +525,10 @@ def preprocess_canvas_image(image_data: np.ndarray) -> Image.Image:
 def get_gpt_feedback(student_answer, q_data, is_image=False):
     """
     Returns a dict with marking report.
-    If is_image=True, also includes an AI "readback" of the handwriting/drawing so the student can check.
+    If is_image=True, also includes an AI readback of the handwriting/drawing so the student can check.
     """
     max_marks = q_data["marks"]
 
-    # We always allow optional readback fields (empty for text answers).
     system_instr = f"""
 You are a strict GCSE Physics examiner.
 
@@ -572,7 +576,7 @@ Max Marks: {max_marks}
 
     try:
         response = client.chat.completions.create(
-            model="gpt-5-mini",
+            model=MODEL_NAME,
             messages=messages,
             max_completion_tokens=2500,
             response_format={"type": "json_object"}
@@ -626,7 +630,7 @@ def get_gpt_feedback_custom(student_answer,
                             is_student_image: bool = False):
     """
     Returns a dict with marking report.
-    If is_student_image=True, also includes an AI "readback" of the student's handwriting/drawing.
+    If is_student_image=True, also includes an AI readback of the student's handwriting/drawing.
     """
     system_instr = f"""
 You are a strict GCSE Physics examiner.
@@ -674,7 +678,7 @@ Max Marks: {int(max_marks)}
 
     try:
         response = client.chat.completions.create(
-            model="gpt-5-mini",
+            model=MODEL_NAME,
             messages=messages,
             max_completion_tokens=2500,
             response_format={"type": "json_object"}
@@ -1020,12 +1024,24 @@ with tab_student:
 with tab_teacher:
     st.subheader("🔒 Teacher Dashboard")
 
+    with st.expander("Database tools"):
+        if st.button("Reconnect to database"):
+            _cached_engine.clear()
+            st.session_state["db_table_ready"] = False
+            st.session_state["custom_table_ready"] = False
+            st.rerun()
+        if st.session_state.get("db_last_error"):
+            st.write("Last DB error:")
+            st.code(st.session_state["db_last_error"])
+
     if not st.secrets.get("DATABASE_URL", "").strip():
         st.info("Database not configured in secrets.")
     elif not db_ready():
         st.error("Database Connection Failed. Check drivers and URL.")
         if not get_db_driver_type():
             st.caption("No Postgres driver found. Add 'psycopg[binary]' (or psycopg2-binary) to requirements.txt")
+        if st.session_state.get("db_last_error"):
+            st.caption(st.session_state["db_last_error"])
     else:
         teacher_pw = st.text_input("Teacher password", type="password")
         if teacher_pw and teacher_pw == st.secrets.get("TEACHER_PASSWORD", ""):
@@ -1074,6 +1090,16 @@ with tab_teacher:
 # -------------------------
 with tab_bank:
     st.subheader("📚 Question Bank (Upload one question at a time)")
+
+    with st.expander("Database tools"):
+        if st.button("Reconnect to database", key="reconnect_db_bank"):
+            _cached_engine.clear()
+            st.session_state["db_table_ready"] = False
+            st.session_state["custom_table_ready"] = False
+            st.rerun()
+        if st.session_state.get("db_last_error"):
+            st.write("Last DB error:")
+            st.code(st.session_state["db_last_error"])
 
     if not db_ready():
         st.error("Database not ready. Configure DATABASE_URL first.")
@@ -1149,7 +1175,6 @@ with tab_bank:
                             markscheme_text=""
                         )
                         if ok_db:
-                            # Refresh cached list so new question appears immediately
                             st.session_state["cached_dfq"] = None
                             st.session_state["cached_labels_map_key"] = None
                             st.success("Saved. This question is now available under 'Teacher Uploads' in the Student tab.")
