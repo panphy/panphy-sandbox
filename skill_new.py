@@ -22,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Tuple, Optional
 
 # ============================================================
-# 1) NEW DATABASE TABLE DDL (rate_limits)
+# DATABASE TABLE DDL (rate_limits)
 # ============================================================
 RATE_LIMITS_DDL = """
 create table if not exists public.rate_limits (
@@ -35,7 +35,7 @@ create index if not exists idx_rate_limits_window_start_time
 """.strip()
 
 # ============================================================
-# 4) LOGGING FOR DEBUGGING (configure at startup)
+# LOGGING FOR DEBUGGING (configure at startup)
 # ============================================================
 class KVFormatter(logging.Formatter):
     """Formatter that appends structured key-value pairs: [k=v] ..."""
@@ -328,7 +328,7 @@ def ensure_attempts_table():
 
 
 # ============================================================
-# 1) RATE LIMITING (stored in Postgres)
+# RATE LIMITING (stored in Postgres)
 # ============================================================
 def ensure_rate_limits_table():
     eng = get_db_engine()
@@ -835,7 +835,7 @@ def preprocess_canvas_image(image_data: np.ndarray) -> Image.Image:
 
 
 # ============================================================
-# 3) FILE SIZE VALIDATION + COMPRESSION
+# FILE SIZE VALIDATION + COMPRESSION
 # ============================================================
 def _human_mb(num_bytes: int) -> str:
     return f"{(num_bytes / (1024 * 1024)):.1f}MB"
@@ -978,7 +978,7 @@ def _compress_bytes_to_limit(
 
 
 # ============================================================
-# 2) BETTER PROGRESS INDICATORS (with estimated time)
+# BETTER PROGRESS INDICATORS (with estimated time)
 # ============================================================
 def _run_ai_with_progress(task_fn, mode: str, ctx: dict, typical_range: str, est_seconds: float) -> dict:
     """
