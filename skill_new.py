@@ -1494,7 +1494,8 @@ with tab_student:
                     st.session_state["feedback"] = report
 
                     LOGGER.info(f"{_kv(student_id=eff_sid, question=q_key, mode=mode, duration=f'{duration:.1f}s')} OpenAI marking completed")
-                    LOGGER.info(f"{_kv(student_id=eff_sid, question=q_key, mode=mode, marks=f'{report.get('marks_awarded',0)}/{report.get('max_marks',0)')} Feedback generated")
+                    LOGGER.info(
+    f"{_kv(student_id=eff_sid, question=q_key, mode=mode, marks=f'{report.get(\"marks_awarded\",0)}/{report.get(\"max_marks\",0)}')} Feedback generated"
 
                     if db_ready() and q_key:
                         insert_attempt(student_id, q_key, st.session_state["feedback"], mode=mode)
