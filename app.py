@@ -394,11 +394,70 @@ def db_ready() -> bool:
     return get_db_engine() is not None
 
 
+def _split_sql_statements(sql_blob: str) -> list[str]:
+    """
+    Split SQL by semicolons, but do NOT split inside Postgres dollar-quoted blocks ($$...$$)
+    or inside single-quoted strings.
+    This is enough for our DDL, which uses $$ for PL/pgSQL.
+    """
+    s = (sql_blob or "").strip()
+    if not s:
+        return []
+
+    out = []
+    buf = []
+    in_single = False
+    in_dollar = False
+
+    i = 0
+    n = len(s)
+    while i < n:
+        # Toggle $$...$$ blocks
+        if not in_single and i + 1 < n and s[i] == "$" and s[i + 1] == "$":
+            in_dollar = not in_dollar
+            buf.append("$$")
+            i += 2
+            continue
+
+        ch = s[i]
+
+        # Toggle single quotes (ignore escaped '')
+        if not in_dollar and ch == "'":
+            if in_single:
+                # If it's an escaped quote inside a string: ''
+                if i + 1 < n and s[i + 1] == "'":
+                    buf.append("''")
+                    i += 2
+                    continue
+                in_single = False
+            else:
+                in_single = True
+            buf.append(ch)
+            i += 1
+            continue
+
+        # Statement boundary only if not inside quotes/dollar blocks
+        if ch == ";" and (not in_single) and (not in_dollar):
+            stmt = "".join(buf).strip()
+            if stmt:
+                out.append(stmt)
+            buf = []
+            i += 1
+            continue
+
+        buf.append(ch)
+        i += 1
+
+    tail = "".join(buf).strip()
+    if tail:
+        out.append(tail)
+
+    return out
+
+
 def _exec_sql_many(conn, sql_blob: str):
-    parts = [p.strip() for p in (sql_blob or "").split(";")]
-    for p in parts:
-        if p:
-            conn.execute(text(p))
+    for stmt in _split_sql_statements(sql_blob):
+        conn.execute(text(stmt))
 
 
 def ensure_attempts_table():
