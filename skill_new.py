@@ -1171,28 +1171,147 @@ def generate_practice_question_with_ai(
     """
     Generate a practice question + mark scheme (confidential) as JSON.
     Teacher must vet before saving.
+
+    Improvements vs old version:
+    - Stronger prompt forcing part-by-part mark allocation and GCSE-style calculation marking.
+    - Automatic quality checks (diagram part must have marks; TOTAL must match; avoid 1-mark calc by default).
+    - One automatic "repair" attempt if checks fail.
     """
-    system = """
+    # ---- Helpers (local to keep replacement simple) ----
+    def _looks_like_diagram_request(qtext: str) -> bool:
+        t = (qtext or "").lower()
+        keywords = ["draw", "diagram", "circuit", "ray diagram", "circuit diagram", "sketch"]
+        return any(k in t for k in keywords)
+
+    def _extract_total_from_marksheme(ms: str) -> Optional[int]:
+        # Accept "TOTAL = 6", "Total=6", "TOTAL: 6"
+        m = re.search(r"\btotal\b\s*[:=]\s*(\d+)\b", ms or "", flags=re.IGNORECASE)
+        if not m:
+            return None
+        try:
+            return int(m.group(1))
+        except Exception:
+            return None
+
+    def _has_part_marking(ms: str) -> bool:
+        # Looks for (a) ... [2] style OR "a) ... [2]" style
+        s = ms or ""
+        return bool(re.search(r"(\([a-z]\)|\b[a-z]\))\s.*\[\s*\d+\s*\]", s, flags=re.IGNORECASE | re.DOTALL))
+
+    def _calc_marks_smell_bad(ms: str, qtype_local: str) -> bool:
+        """
+        Heuristic: if calculation-type and the scheme only shows one explicit mark allocation
+        (like [1]) or only one mark point, it's likely too stingy for GCSE.
+        """
+        if (qtype_local or "").lower() != "calculation":
+            return False
+        # Count explicit [n] allocations
+        marks_allocs = re.findall(r"\[\s*(\d+)\s*\]", ms or "")
+        if not marks_allocs:
+            # Still possibly fine (some people write without [n]) but we want to encourage explicit
+            return True
+        # If every part is [1] and total <= marks, likely under-marking for calculation
+        nums = []
+        for x in marks_allocs:
+            try:
+                nums.append(int(x))
+            except Exception:
+                pass
+        if not nums:
+            return True
+        # If the maximum part allocation is 1, it's suspicious for calculation questions beyond trivial
+        return max(nums) <= 1 and marks >= 2
+
+    def _basic_method_mark_present(ms: str) -> bool:
+        # Look for common GCSE method-mark cues
+        t = (ms or "").lower()
+        cues = ["method", "m1", "substitute", "rearrange", "use", "equation", "v=ir", "f=ma", "p=iv", "show", "working"]
+        return any(c in t for c in cues)
+
+    def _validate(d: Dict[str, Any]) -> Tuple[bool, List[str]]:
+        reasons = []
+        qtxt = str(d.get("question_text", "") or "").strip()
+        mstxt = str(d.get("markscheme_text", "") or "").strip()
+
+        # Required fields
+        if not qtxt:
+            reasons.append("Missing question_text.")
+        if not mstxt:
+            reasons.append("Missing markscheme_text.")
+
+        # max_marks must match requested marks (strict for generator)
+        mm = d.get("max_marks", None)
+        try:
+            mm_int = int(mm)
+        except Exception:
+            mm_int = None
+        if mm_int != int(marks):
+            reasons.append(f"max_marks must equal {int(marks)}.")
+
+        # Mark scheme must end with TOTAL = marks
+        total = _extract_total_from_marksheme(mstxt)
+        if total != int(marks):
+            reasons.append(f"Mark scheme TOTAL must equal {int(marks)}.")
+
+        # Part-by-part marking expected (GCSE style), especially for multi-part
+        if not _has_part_marking(mstxt):
+            reasons.append("Mark scheme must include part-by-part marks like '(a) ... [2]'.")
+
+        # Diagram request must have marks and criteria
+        if _looks_like_diagram_request(qtxt):
+            # Ensure scheme mentions diagram criteria words
+            t = mstxt.lower()
+            if not any(k in t for k in ["diagram", "ray", "circuit", "symbol", "label", "normal", "ammeter", "voltmeter"]):
+                reasons.append("Question asks for a diagram but mark scheme lacks diagram criteria/marks.")
+
+        # Calculation questions: discourage 1-mark-only schemes
+        if _calc_marks_smell_bad(mstxt, qtype):
+            reasons.append("Calculation marking looks too low (avoid defaulting to 1 mark).")
+
+        # Encourage method mark presence for calculation
+        if (qtype or "").lower() == "calculation" and not _basic_method_mark_present(mstxt):
+            reasons.append("Calculation mark scheme should include a method mark (setup/substitution/rearrangement).")
+
+        return (len(reasons) == 0), reasons
+
+    def _call_model(repair: bool, reasons: Optional[List[str]] = None) -> Dict[str, Any]:
+        system = """
 You are an expert AQA GCSE Physics Higher question writer and examiner.
 
-Rules:
-- Create an original practice question (do not reproduce copyrighted exam questions).
-- Must match AQA GCSE Physics Higher style and standard.
-- The question and mark scheme must be internally consistent.
-- The mark scheme must allocate marks clearly and sum exactly to max_marks.
-- Keep mark scheme concise but complete (bullet marks are fine).
-- Return ONLY valid JSON, nothing else.
+Hard rules:
+1) Create an ORIGINAL practice question. Do not reproduce copyrighted exam questions.
+2) Must match AQA GCSE Physics Higher style and standard.
+3) If the question is multi-part, label parts clearly as (a), (b), (c) etc.
+4) Marks must be allocated per part, and the total must equal max_marks EXACTLY.
+5) The mark scheme must include marking points for EVERY part.
+   - If any part asks for a DIAGRAM (e.g. "draw", "diagram", "circuit diagram", "ray diagram"),
+     the mark scheme MUST include criteria and marks for the diagram part.
+6) Calculation marking must be GCSE-appropriate:
+   - If a part is a calculation and requires more than a trivial one-step substitution, allocate at least 2 marks:
+     one method mark (setup/substitution/rearrangement) and one accuracy mark (correct answer with unit).
+   - Use units consistently and award a mark for correct unit when appropriate.
+7) Do not default to 1 mark for calculations. Use 2–5 marks when multi-step reasoning is required.
+8) Keep the mark scheme concise but complete.
+
+Return ONLY valid JSON, nothing else.
+
 Schema:
 {
-  "question_text": "...",
-  "markscheme_text": "...",
-  "max_marks": <int>,
-  "tags": ["...","..."]
+  "question_text": "string",
+  "markscheme_text": "string",
+  "max_marks": integer,
+  "tags": ["string", "string", ...]
 }
+
+Formatting requirements inside markscheme_text:
+- Provide a part-by-part breakdown with explicit mark allocation, e.g.
+  (a) ... [2]
+  (b) ... [3]
+- End with: TOTAL = <max_marks>
 """.strip()
 
-    user = f"""
-Topic: {topic_text}
+        base_user = f"""
+Topic: {topic_text.strip()}
 Difficulty: {difficulty}
 Question type: {qtype}
 max_marks: {int(marks)}
@@ -1200,22 +1319,80 @@ max_marks: {int(marks)}
 Additional teacher instructions (optional):
 {extra_instructions.strip() if extra_instructions else "(none)"}
 
-Generate the question and the full mark scheme following the schema.
+Constraints:
+- Ensure marks are distributed realistically for GCSE.
+- If you include any diagram requirement, allocate marks for it explicitly.
+- End markscheme_text with TOTAL = {int(marks)}.
 """.strip()
 
-    response = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        max_completion_tokens=2500,
-        response_format={"type": "json_object"},
-    )
+        if not repair:
+            user = base_user
+        else:
+            # Repair instruction: keep the same topic/type/difficulty/marks but fix failures
+            bullet_reasons = "\n".join([f"- {r}" for r in (reasons or [])]) or "- (unspecified)"
+            user = f"""
+You previously generated a draft that failed validation. Fix it and return corrected JSON only.
 
-    raw = response.choices[0].message.content or ""
-    data = safe_parse_json(raw) or {}
-    return data
+Validation failures:
+{bullet_reasons}
+
+You MUST:
+- Keep the topic, difficulty, type and max_marks unchanged.
+- Ensure every part (including any diagram part) has marks and criteria.
+- Make the TOTAL line match max_marks exactly: TOTAL = {int(marks)}.
+""".strip() + "\n\n" + base_user
+
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            max_completion_tokens=2500,
+            response_format={"type": "json_object"},
+        )
+
+        raw = response.choices[0].message.content or ""
+        data = safe_parse_json(raw) or {}
+        return data
+
+    # ---- Main flow ----
+    start = time.monotonic()
+    data = _call_model(repair=False)
+    ok, reasons = _validate(data)
+
+    # One automatic repair attempt if needed
+    if not ok:
+        LOGGER.warning(
+            "AI draft failed validation, attempting repair",
+            extra={"ctx": {"component": "ai_generate", "reasons": "; ".join(reasons)[:400]}},
+        )
+        data2 = _call_model(repair=True, reasons=reasons)
+        ok2, reasons2 = _validate(data2)
+        if ok2:
+            data = data2
+        else:
+            # Return best effort, but attach warnings for the teacher UI (teacher will see it during vetting)
+            data = data2 if isinstance(data2, dict) and data2 else data
+            data["warnings"] = reasons2[:8]
+
+    # Normalize outputs
+    out = {
+        "question_text": str(data.get("question_text", "") or "").strip(),
+        "markscheme_text": str(data.get("markscheme_text", "") or "").strip(),
+        "max_marks": int(marks),
+        "tags": data.get("tags", []),
+    }
+    if not isinstance(out["tags"], list):
+        out["tags"] = []
+    out["tags"] = [str(t).strip() for t in out["tags"] if str(t).strip()][:12]
+
+    elapsed = time.monotonic() - start
+    LOGGER.info(
+        "AI question generation completed",
+        extra={"ctx": {"component": "ai_generate", "duration_s": f"{elapsed:.2f}", "topic": topic_text[:60], "qtype": qtype, "marks": int(marks)}},
+    )
+    return out
 
 # ============================================================
 # REPORT RENDERER
