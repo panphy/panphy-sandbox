@@ -1204,7 +1204,7 @@ Max Marks: {int(max_marks)}
         {"role": "user", "content": content}
     ]
 
-      try:
+    try:
         response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=messages,
