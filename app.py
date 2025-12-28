@@ -24,12 +24,6 @@ from typing import Tuple, Optional, Dict, Any, List
 # LOGGING FOR DEBUGGING (configure at app startup)
 # ============================================================
 class KVFormatter(logging.Formatter):
-    """
-    Formatter that appends structured key-value pairs if record has `ctx` dict.
-    Example:
-      2025-12-28 14:32:15 INFO Submission received [student_id=10A_23] [question=QB:12:...] [mode=text]
-    """
-
     def format(self, record: logging.LogRecord) -> str:
         base = super().format(record)
         ctx = getattr(record, "ctx", None)
@@ -49,13 +43,11 @@ def setup_logging() -> logging.Logger:
     logger.setLevel(logging.INFO)
     fmt = KVFormatter("%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 
-    # Console for Streamlit Cloud
     ch = logging.StreamHandler()
     ch.setLevel(logging.INFO)
     ch.setFormatter(fmt)
     logger.addHandler(ch)
 
-    # File for local dev (best-effort)
     try:
         log_path = os.environ.get("PANPHY_LOG_FILE", "panphy_app.log")
         fh = RotatingFileHandler(log_path, maxBytes=2_000_000, backupCount=3)
@@ -63,7 +55,6 @@ def setup_logging() -> logging.Logger:
         fh.setFormatter(fmt)
         logger.addHandler(fh)
     except Exception:
-        # Avoid hard-failing if file logging is unavailable (common on Streamlit Cloud)
         pass
 
     logger.propagate = False
@@ -92,11 +83,11 @@ MAX_IMAGE_WIDTH = 1024
 
 STORAGE_BUCKET = "physics-bank"
 
-# 1) Rate limiting
+# Rate limiting
 RATE_LIMIT_MAX = 10
 RATE_LIMIT_WINDOW_SECONDS = 60 * 60  # 1 hour
 
-# 3) Image limits
+# Image limits
 MAX_DIM_PX = 4000
 QUESTION_MAX_MB = 5.0
 MARKSCHEME_MAX_MB = 5.0
@@ -104,7 +95,6 @@ CANVAS_MAX_MB = 2.0
 
 # AI question generation
 AQA_GCSE_HIGHER_TOPICS = [
-    # Paper 1
     "Energy stores and transfers",
     "Work done and power",
     "Efficiency",
@@ -124,7 +114,6 @@ AQA_GCSE_HIGHER_TOPICS = [
     "Domestic electricity and safety",
     "Static electricity",
     "Particle model and internal energy",
-    # Paper 2
     "Forces and motion (Newton's laws)",
     "Resultant force and acceleration",
     "Stopping distance",
@@ -145,22 +134,6 @@ QUESTION_TYPES = ["Calculation", "Explanation", "Practical/Methods", "Graph/Anal
 DIFFICULTIES = ["Easy", "Medium", "Hard"]
 
 # ============================================================
-# SQL HELPERS (important for psycopg + multi-statement DDL)
-# ============================================================
-def _exec_sql_many(conn, sql_blob: str):
-    """
-    Execute a semicolon-separated SQL blob safely by splitting into individual statements.
-
-    IMPORTANT:
-    This splitter assumes no procedural blocks with semicolons inside (e.g. $$ ... $$).
-    Keep DDL blobs simple (table/index/constraint only).
-    """
-    for stmt in [s.strip() for s in (sql_blob or "").split(";")]:
-        if stmt:
-            conn.execute(text(stmt))
-
-
-# ============================================================
 # DATABASE DDLs
 # ============================================================
 RATE_LIMITS_DDL = """
@@ -169,37 +142,39 @@ create table if not exists public.rate_limits (
   submission_count int not null default 0,
   window_start_time timestamptz not null default now()
 );
-
 create index if not exists idx_rate_limits_window_start_time
   on public.rate_limits (window_start_time);
 """.strip()
 
-# NOTE:
-# Use simple DDL only (no plpgsql triggers/functions) to avoid multi-command execution issues.
 QUESTION_BANK_DDL = """
 create table if not exists public.question_bank_v1 (
   id bigserial primary key,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
 
+  -- provenance
   source text not null check (source in ('teacher','ai_generated')),
   created_by text,
 
+  -- organization
   assignment_name text not null,
   question_label text not null,
   max_marks int not null check (max_marks > 0),
-  tags jsonb not null default '[]'::jsonb,
+  tags jsonb,
 
+  -- question content
   question_text text,
   question_image_path text,
 
+  -- mark scheme content (confidential, never shown to students)
   markscheme_text text,
   markscheme_image_path text,
 
-  is_active boolean not null default true,
-
-  unique (source, assignment_name, question_label)
+  is_active boolean not null default true
 );
+
+create unique index if not exists uq_question_bank_source_assignment_label
+  on public.question_bank_v1 (source, assignment_name, question_label);
 
 create index if not exists idx_question_bank_assignment
   on public.question_bank_v1 (assignment_name);
@@ -209,6 +184,19 @@ create index if not exists idx_question_bank_source
 
 create index if not exists idx_question_bank_active
   on public.question_bank_v1 (is_active);
+
+create or replace function public.set_updated_at()
+returns trigger language plpgsql as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_question_bank_updated_at on public.question_bank_v1;
+create trigger trg_question_bank_updated_at
+before update on public.question_bank_v1
+for each row execute function public.set_updated_at();
 """.strip()
 
 # =========================
@@ -301,9 +289,9 @@ if "cached_labels_map_key" not in st.session_state:
 if "ai_draft" not in st.session_state:
     st.session_state["ai_draft"] = None
 
-# =========================
+# ============================================================
 #  ROBUST DATABASE LAYER
-# =========================
+# ============================================================
 def get_db_driver_type():
     try:
         import psycopg  # noqa
@@ -357,6 +345,17 @@ def db_ready() -> bool:
     return get_db_engine() is not None
 
 
+def _exec_sql_many(conn, sql_blob: str):
+    """
+    Execute multiple SQL statements separated by semicolons.
+    Ignores empty statements.
+    """
+    parts = [p.strip() for p in (sql_blob or "").split(";")]
+    for p in parts:
+        if p:
+            conn.execute(text(p))
+
+
 def ensure_attempts_table():
     if st.session_state.get("db_table_ready", False):
         return
@@ -377,7 +376,7 @@ def ensure_attempts_table():
       feedback_points jsonb,
       next_steps jsonb
     );
-    """.strip()
+    """
 
     ddl_alter = """
     alter table public.physics_attempts_v1
@@ -386,7 +385,7 @@ def ensure_attempts_table():
       add column if not exists readback_markdown text;
     alter table public.physics_attempts_v1
       add column if not exists readback_warnings jsonb;
-    """.strip()
+    """
 
     try:
         with eng.begin() as conn:
@@ -414,6 +413,47 @@ def ensure_rate_limits_table():
         LOGGER.error("Rate limits table ensure failed", extra={"ctx": {"component": "db", "error": type(e).__name__}})
 
 
+def _fix_question_bank_source_constraint(conn):
+    """
+    Auto-fix an old/wrong CHECK constraint on question_bank_v1.source that rejects 'ai_generated'.
+    """
+    try:
+        rows = conn.execute(text("""
+            select conname, pg_get_constraintdef(c.oid) as condef
+            from pg_constraint c
+            where c.conrelid = 'public.question_bank_v1'::regclass
+              and c.contype = 'c'
+        """)).mappings().all()
+    except Exception:
+        return
+
+    def _norm(s: str) -> str:
+        return re.sub(r"\s+", "", (s or "").lower())
+
+    desired_bits = ["source", "teacher", "ai_generated"]
+
+    for r in rows:
+        name = r.get("conname", "")
+        condef = r.get("condef", "")
+        n = _norm(condef)
+        if "source" in n:
+            ok = all(bit in n for bit in desired_bits)
+            if not ok:
+                try:
+                    conn.execute(text(f'alter table public.question_bank_v1 drop constraint if exists "{name}"'))
+                except Exception:
+                    pass
+
+    try:
+        conn.execute(text("""
+            alter table public.question_bank_v1
+            add constraint question_bank_v1_source_check
+            check (source in ('teacher','ai_generated'))
+        """))
+    except Exception:
+        pass
+
+
 def ensure_question_bank_table():
     if st.session_state.get("bank_table_ready", False):
         return
@@ -423,7 +463,10 @@ def ensure_question_bank_table():
     try:
         with eng.begin() as conn:
             _exec_sql_many(conn, QUESTION_BANK_DDL)
+            _fix_question_bank_source_constraint(conn)
+
         st.session_state["bank_table_ready"] = True
+        st.session_state["db_last_error"] = ""
         LOGGER.info("Question bank table ready", extra={"ctx": {"component": "db", "table": "question_bank_v1"}})
     except Exception as e:
         st.session_state["db_last_error"] = f"Question Bank Table Error: {type(e).__name__}: {e}"
@@ -450,16 +493,11 @@ def _format_reset_time(dt_utc: datetime) -> str:
 
 
 def check_rate_limit(student_id: str) -> Tuple[bool, int, str]:
-    """
-    Returns (allowed, remaining, reset_time_str).
-    Teachers bypass limits.
-    """
     if st.session_state.get("is_teacher", False):
         return True, RATE_LIMIT_MAX, ""
 
     eng = get_db_engine()
     if eng is None:
-        # Fail-open to avoid blocking if DB is temporarily unavailable
         LOGGER.warning("Rate limit DB not ready, allowing request", extra={"ctx": {"component": "rate_limit"}})
         return True, RATE_LIMIT_MAX, ""
 
@@ -528,10 +566,6 @@ def check_rate_limit(student_id: str) -> Tuple[bool, int, str]:
 
 
 def increment_rate_limit(student_id: str):
-    """
-    Increment the student's submission count. Call only after passing check_rate_limit.
-    Teachers bypass.
-    """
     if st.session_state.get("is_teacher", False):
         return
 
@@ -580,21 +614,11 @@ def upload_to_storage(path: str, file_bytes: bytes, content_type: str) -> bool:
         st.session_state["db_last_error"] = "Supabase Storage not configured."
         return False
     try:
-        # Different supabase client versions accept different option formats.
-        # Try a couple of common patterns.
-        try:
-            res = sb.storage.from_(STORAGE_BUCKET).upload(
-                path,
-                file_bytes,
-                {"content-type": content_type, "upsert": "true"}
-            )
-        except Exception:
-            res = sb.storage.from_(STORAGE_BUCKET).upload(
-                path,
-                file_bytes,
-                file_options={"content-type": content_type, "upsert": True}
-            )
-
+        res = sb.storage.from_(STORAGE_BUCKET).upload(
+            path,
+            file_bytes,
+            {"content-type": content_type, "upsert": "true"}
+        )
         err = None
         if hasattr(res, "error"):
             err = getattr(res, "error")
@@ -602,7 +626,6 @@ def upload_to_storage(path: str, file_bytes: bytes, content_type: str) -> bool:
             err = res.get("error")
         if err:
             raise RuntimeError(str(err))
-
         LOGGER.info("Storage upload success", extra={"ctx": {"component": "storage", "path": path, "bytes": len(file_bytes)}})
         return True
     except Exception as e:
@@ -643,13 +666,6 @@ def _human_mb(num_bytes: int) -> str:
 
 
 def validate_image_file(file_bytes: bytes, max_mb: float, purpose: str) -> Tuple[bool, str]:
-    """
-    Validate raw bytes:
-      - must be a valid image
-      - dimensions <= 4000x4000
-      - file size <= max_mb
-    Returns (ok, message). If ok True, message is empty.
-    """
     if not file_bytes:
         return False, "No image data received."
 
@@ -683,11 +699,6 @@ def _encode_image_bytes(img: Image.Image, fmt: str, quality: int = 85) -> bytes:
 
 
 def compress_image_if_needed(img: Image.Image, max_kb: int) -> Image.Image:
-    """
-    Requested helper signature.
-    Best-effort compression to get an image below max_kb (KB) by reducing JPEG quality and/or size.
-    Returns a PIL image (may be resized). Note: for exact byte enforcement, use bytes-based compression below.
-    """
     target_bytes = int(max_kb * 1024)
     w, h = img.size
     for q in [85, 80, 75, 70, 65, 60, 55, 50]:
@@ -713,10 +724,6 @@ def _compress_bytes_to_limit(
     purpose: str,
     prefer_fmt: Optional[str] = None,
 ) -> Tuple[bool, bytes, str, str]:
-    """
-    Compress bytes if only slightly over limit (<= 30% over).
-    Returns (ok, out_bytes, content_type, error_message).
-    """
     max_bytes = int(max_mb * 1024 * 1024)
     size_bytes = len(file_bytes)
 
@@ -832,6 +839,21 @@ def clamp_int(value, lo, hi, default=0):
     except Exception:
         v = default
     return max(lo, min(hi, v))
+
+# ============================================================
+# MARKDOWN + LaTeX RENDER HELPERS
+# ============================================================
+def render_md_box(title: str, md_text: str, caption: str = "", empty_text: str = ""):
+    st.markdown(f"**{title}**")
+    with st.container(border=True):
+        txt = (md_text or "").strip()
+        if txt:
+            st.markdown(txt)
+        else:
+            st.caption(empty_text or "No content.")
+    if caption:
+        st.caption(caption)
+
 
 # ============================================================
 # PROGRESS INDICATORS
@@ -1005,7 +1027,6 @@ def insert_question_bank_row(
 ) -> bool:
     eng = get_db_engine()
     if eng is None:
-        st.session_state["db_last_error"] = "DB engine not ready."
         return False
     ensure_question_bank_table()
 
@@ -1014,20 +1035,18 @@ def insert_question_bank_row(
       (source, created_by, assignment_name, question_label, max_marks, tags,
        question_text, question_image_path,
        markscheme_text, markscheme_image_path,
-       is_active,
-       updated_at)
+       is_active)
     values
       (:source, :created_by, :assignment_name, :question_label, :max_marks,
        CAST(:tags AS jsonb),
        :question_text, :question_image_path,
        :markscheme_text, :markscheme_image_path,
-       true,
-       now())
+       true)
     on conflict (source, assignment_name, question_label) do nothing
     """
     try:
         with eng.begin() as conn:
-            res = conn.execute(text(query), {
+            conn.execute(text(query), {
                 "source": source,
                 "created_by": (created_by or "").strip() or None,
                 "assignment_name": assignment_name.strip(),
@@ -1039,11 +1058,7 @@ def insert_question_bank_row(
                 "markscheme_text": (markscheme_text or "").strip()[:20000] or None,
                 "markscheme_image_path": (markscheme_image_path or "").strip() or None,
             })
-        st.session_state["db_last_error"] = ""
-        LOGGER.info(
-            "Question saved",
-            extra={"ctx": {"component": "question_bank", "source": source, "assignment": assignment_name, "label": question_label, "rowcount": getattr(res, "rowcount", None)}},
-        )
+        LOGGER.info("Question saved", extra={"ctx": {"component": "question_bank", "source": source, "assignment": assignment_name, "label": question_label}})
         return True
     except Exception as e:
         st.session_state["db_last_error"] = f"Insert Question Bank Error: {type(e).__name__}: {e}"
@@ -1113,7 +1128,6 @@ def get_gpt_feedback_from_bank(
     system_instr = _mk_system_schema(max_marks=max_marks, question_text=question_text if question_text else "")
     messages = [{"role": "system", "content": system_instr}]
 
-    # Confidential mark scheme (text)
     if markscheme_text:
         messages.append({"role": "system", "content": f"CONFIDENTIAL MARKING SCHEME (DO NOT REVEAL): {markscheme_text}"})
 
@@ -1121,7 +1135,6 @@ def get_gpt_feedback_from_bank(
     intro = "Mark this work. If the student answer is an image, also provide a readback (Markdown + LaTeX if needed). Return JSON only."
     content.append({"type": "text", "text": intro})
 
-    # Provide question and mark scheme images if present
     if question_img is not None:
         content.append({"type": "text", "text": "Question image:"})
         content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encode_image(question_img)}"}})
@@ -1168,7 +1181,7 @@ def get_gpt_feedback_from_bank(
             "marks_awarded": 0,
             "max_marks": max_marks,
             "summary": "The examiner could not process this attempt (AI Error).",
-            "feedback_points": ["Please try submitting again.", f"Error details: {str(e)[:50]}"],
+            "feedback_points": ["Please try submitting again.", f"Error details: {str(e)[:120]}"],
             "next_steps": []
         }
 
@@ -1182,10 +1195,6 @@ def generate_practice_question_with_ai(
     marks: int,
     extra_instructions: str = "",
 ) -> Dict[str, Any]:
-    """
-    Generate a practice question + mark scheme (confidential) as JSON.
-    Teacher must vet before saving.
-    """
     def _looks_like_diagram_request(qtext: str) -> bool:
         t = (qtext or "").lower()
         keywords = ["draw", "diagram", "circuit", "ray diagram", "circuit diagram", "sketch"]
@@ -1467,7 +1476,6 @@ with tab_student:
         else:
             ensure_question_bank_table()
 
-            # Load and cache the question list
             if st.session_state["cached_bank_df"] is None:
                 dfb = load_question_bank_df(limit=5000, include_inactive=False)
                 st.session_state["cached_bank_df"] = dfb
@@ -1475,7 +1483,6 @@ with tab_student:
             else:
                 dfb = st.session_state["cached_bank_df"]
 
-            # Filter by source selection
             if dfb is None or dfb.empty:
                 st.info("No questions in the database yet. Ask a teacher to generate or upload questions in the Question Bank tab.")
             else:
@@ -1514,7 +1521,6 @@ with tab_student:
                         choice = st.selectbox("Select Question:", choices, key="student_choice")
                         chosen_id = int(st.session_state["cached_labels_map"][choice])
 
-                        # Load question details only when selection changes
                         if st.session_state["selected_qid"] != chosen_id:
                             st.session_state["selected_qid"] = chosen_id
                             q_row = load_question_by_id(chosen_id)
@@ -1535,15 +1541,17 @@ with tab_student:
                         if q_row:
                             max_marks = int(q_row.get("max_marks", 1))
                             q_key = f"QB:{int(q_row['id'])}:{q_row.get('source','')}:{q_row.get('assignment_name','')}:{q_row.get('question_label','')}"
-
                             q_text = (q_row.get("question_text") or "").strip()
 
-                            if question_img is not None:
-                                st.image(question_img, caption="Question image", use_container_width=True)
-                            elif q_text:
-                                st.markdown(f"**{q_text}**")
-                            else:
-                                st.warning("This question has no question text or image.")
+                            # Student question "box" (Markdown + LaTeX)
+                            st.markdown("**Question**")
+                            with st.container(border=True):
+                                if question_img is not None:
+                                    st.image(question_img, caption="Question image", use_container_width=True)
+                                if q_text:
+                                    st.markdown(q_text)
+                                if (question_img is None) and (not q_text):
+                                    st.warning("This question has no question text or image.")
 
                             st.caption(f"Max Marks: {max_marks}")
 
@@ -1908,7 +1916,7 @@ with tab_bank:
             if st.session_state.get("ai_draft"):
                 d = st.session_state["ai_draft"]
 
-                st.write("### ✅ Vet and edit the draft (not saved yet)")
+                st.write("### ✅ Vet and edit the draft (Markdown + LaTeX supported)")
                 ed1, ed2 = st.columns([2, 1])
                 with ed1:
                     d_assignment = st.text_input("Assignment name", value=d.get("assignment_name", "AI Practice"), key="draft_assignment")
@@ -1919,10 +1927,17 @@ with tab_bank:
                 with ed2:
                     st.caption("Mark scheme is confidential. Students never see it.")
                     approve_clicked = st.button("Approve & Save to bank", type="primary", use_container_width=True)
-                    st.caption("Saving is one-way (but you can delete rows from Supabase later in prototype).")
+                    st.caption("Tip: use Markdown and LaTeX ($...$) freely.")
 
                 d_qtext = st.text_area("Question text (student will see this)", value=d.get("question_text", ""), height=180, key="draft_qtext")
                 d_mstext = st.text_area("Mark scheme (teacher-only)", value=d.get("markscheme_text", ""), height=220, key="draft_mstext")
+
+                # Live previews (Markdown + LaTeX)
+                p1, p2 = st.columns(2)
+                with p1:
+                    render_md_box("Preview: Question (student view)", d_qtext, empty_text="No question text.")
+                with p2:
+                    render_md_box("Preview: Mark scheme (teacher only)", d_mstext, empty_text="No mark scheme.")
 
                 if approve_clicked:
                     if not d_assignment.strip() or not d_label.strip():
@@ -1950,9 +1965,7 @@ with tab_bank:
                             st.success("Approved and saved. Students can now access this under AI Practice.")
                             LOGGER.info("AI draft approved and saved", extra={"ctx": {"component": "question_bank", "source": "ai_generated", "assignment": d_assignment.strip(), "label": d_label.strip()}})
                         else:
-                            st.error("Failed to save to database.")
-                            if st.session_state.get("db_last_error"):
-                                st.code(st.session_state["db_last_error"])
+                            st.error("Failed to save to database. Check errors below.")
                             LOGGER.error("AI approve/save failed", extra={"ctx": {"component": "question_bank", "source": "ai_generated"}})
 
             st.divider()
@@ -1961,6 +1974,7 @@ with tab_bank:
             # Teacher uploads (image question + image mark scheme)
             # ------------------------------------------------------------
             st.write("## 🖼️ Upload a teacher question (images)")
+            st.caption("Optional question text supports Markdown and LaTeX ($...$).")
 
             with st.form("upload_q_form", clear_on_submit=True):
                 c1, c2 = st.columns([2, 1])
@@ -1971,12 +1985,16 @@ with tab_bank:
                     max_marks_in = st.number_input("Max marks", min_value=1, max_value=50, value=3, step=1)
 
                 tags_str = st.text_input("Tags (comma separated)", placeholder="forces, resultant, newton")
-                q_text_opt = st.text_area("Optional: extracted question text (teacher edit)", height=80)
+                q_text_opt = st.text_area("Optional: question text (Markdown + LaTeX supported)", height=100)
 
                 q_file = st.file_uploader("Upload question screenshot (PNG/JPG)", type=["png", "jpg", "jpeg"])
                 ms_file = st.file_uploader("Upload mark scheme screenshot (PNG/JPG)", type=["png", "jpg", "jpeg"])
 
                 submitted = st.form_submit_button("Save to Question Bank", type="primary")
+
+            # Preview optional text even before saving
+            if q_text_opt and q_text_opt.strip():
+                render_md_box("Preview: Optional question text", q_text_opt)
 
             if submitted:
                 if not assignment_name.strip() or not question_label.strip():
@@ -2045,21 +2063,62 @@ with tab_bank:
                             st.session_state["cached_labels_map_key"] = None
                             st.success("Saved. This question is now available in the Student tab.")
                         else:
-                            st.error("Uploaded images, but failed to save metadata to DB.")
-                            if st.session_state.get("db_last_error"):
-                                st.code(st.session_state["db_last_error"])
+                            st.error("Uploaded images, but failed to save metadata to DB. Check errors below.")
                     else:
-                        st.error("Failed to upload one or both images to Supabase Storage.")
-                        if st.session_state.get("db_last_error"):
-                            st.code(st.session_state["db_last_error"])
+                        st.error("Failed to upload one or both images to Supabase Storage. Check errors below.")
 
-            st.write("")
-            st.write("### Recent question bank entries")
-            df_bank = load_question_bank_df(limit=50, include_inactive=False)
-            if df_bank.empty:
+            st.divider()
+
+            # ------------------------------------------------------------
+            # Browse / preview existing bank entries (Markdown + LaTeX)
+            # ------------------------------------------------------------
+            st.write("## 🔎 Preview existing question bank entries (teacher-only)")
+            df_all = load_question_bank_df(limit=5000, include_inactive=False)
+
+            if df_all.empty:
                 st.info("No questions yet.")
             else:
-                st.dataframe(df_bank, use_container_width=True)
+                df_all = df_all.copy()
+                df_all["label"] = df_all.apply(
+                    lambda r: f"{r['assignment_name']} | {r['question_label']} ({int(r['max_marks'])} marks) [{r['source']}] [id {int(r['id'])}]",
+                    axis=1
+                )
+                pick = st.selectbox("Select an entry to preview", df_all["label"].tolist(), key="bank_preview_pick")
+                pick_id = int(df_all.loc[df_all["label"] == pick, "id"].iloc[0])
+                row = load_question_by_id(pick_id)
+
+                q_text = (row.get("question_text") or "").strip()
+                ms_text = (row.get("markscheme_text") or "").strip()
+                q_path = (row.get("question_image_path") or "").strip()
+                ms_path = (row.get("markscheme_image_path") or "").strip()
+
+                q_img = bytes_to_pil(download_from_storage(q_path)) if q_path else None
+                ms_img = bytes_to_pil(download_from_storage(ms_path)) if ms_path else None
+
+                pv1, pv2 = st.columns(2)
+                with pv1:
+                    st.markdown("**Question (student view)**")
+                    with st.container(border=True):
+                        if q_img is not None:
+                            st.image(q_img, use_container_width=True)
+                        if q_text:
+                            st.markdown(q_text)
+                        if (q_img is None) and (not q_text):
+                            st.caption("No question text/image.")
+                with pv2:
+                    st.markdown("**Mark scheme (teacher only)**")
+                    with st.container(border=True):
+                        if ms_img is not None:
+                            st.image(ms_img, use_container_width=True)
+                        if ms_text:
+                            st.markdown(ms_text)
+                        if (ms_img is None) and (not ms_text):
+                            st.caption("No mark scheme text/image (image-only teacher uploads are supported).")
+
+            st.divider()
+            st.write("### Recent question bank entries")
+            df_bank = load_question_bank_df(limit=50, include_inactive=False)
+            st.dataframe(df_bank, use_container_width=True)
 
             if st.session_state.get("db_last_error"):
                 st.error(f"Error: {st.session_state['db_last_error']}")
