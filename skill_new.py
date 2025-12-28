@@ -21,7 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Tuple, Optional, Dict, Any, List
 
 # ============================================================
-# 4) LOGGING FOR DEBUGGING (configure at app startup)
+# LOGGING FOR DEBUGGING (configure at app startup)
 # ============================================================
 class KVFormatter(logging.Formatter):
     """
@@ -430,7 +430,7 @@ def ensure_question_bank_table():
         LOGGER.error("Question bank table ensure failed", extra={"ctx": {"component": "db", "error": type(e).__name__}})
 
 # ============================================================
-# 1) RATE LIMITING (Per Student, stored in Postgres)
+# RATE LIMITING (Per Student, stored in Postgres)
 # ============================================================
 def _effective_student_id(student_id: str) -> str:
     sid = (student_id or "").strip()
@@ -624,7 +624,7 @@ def bytes_to_pil(img_bytes: bytes) -> Image.Image:
     return img
 
 # ============================================================
-# 3) FILE SIZE VALIDATION + COMPRESSION
+# FILE SIZE VALIDATION + COMPRESSION
 # ============================================================
 def _human_mb(num_bytes: int) -> str:
     return f"{(num_bytes / (1024 * 1024)):.1f}MB"
@@ -827,10 +827,10 @@ def clamp_int(value, lo, hi, default=0):
     return max(lo, min(hi, v))
 
 # ============================================================
-# 2) BETTER PROGRESS INDICATORS
+# PROGRESS INDICATORS
 # ============================================================
 def _run_ai_with_progress(task_fn, mode: str, ctx: dict, typical_range: str, est_seconds: float) -> dict:
-    label = f"Marking… (typically {typical_range})" if mode == "text" else f"Analyzing handwriting… (typically {typical_range})"
+    label = f"Processing… (typically {typical_range})" if mode == "text" else f"Analyzing handwriting… (typically {typical_range})"
 
     with st.status(label, expanded=True) as status:
         progress = st.progress(0)
