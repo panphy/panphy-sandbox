@@ -1655,107 +1655,108 @@ if nav == "🧑‍🎓 Student":
                         if db_ready() and q_key:
                             insert_attempt(student_id, q_key, st.session_state["feedback"], mode="text")
 
-        with tab_write:
-            tool_row = st.columns([2, 1])
-            with tool_row[0]:
-                tool = st.radio("Tool", ["Pen", "Eraser"], horizontal=True, label_visibility="collapsed", key="canvas_tool")
-            clear_clicked = tool_row[1].button("🗑️ Clear", use_container_width=True, key="canvas_clear")
+with tab_write:
+    tool_row = st.columns([2, 1])
+    with tool_row[0]:
+        tool = st.radio("Tool", ["Pen", "Eraser"], horizontal=True, label_visibility="collapsed", key="canvas_tool")
+    clear_clicked = tool_row[1].button("🗑️ Clear", use_container_width=True, key="canvas_clear")
 
-            if clear_clicked:
-                st.session_state["feedback"] = None
-                st.session_state["last_canvas_image_data"] = None
-                st.session_state["canvas_key"] += 1
-                st.rerun()
+    if clear_clicked:
+        st.session_state["feedback"] = None
+        st.session_state["last_canvas_image_data"] = None
+        st.session_state["canvas_key"] += 1
+        st.rerun()
 
-            stroke_width = 2 if tool == "Pen" else 30
-            stroke_color = "#000000" if tool == "Pen" else CANVAS_BG_HEX
+    stroke_width = 2 if tool == "Pen" else 30
+    stroke_color = "#000000" if tool == "Pen" else CANVAS_BG_HEX
 
-            # IMPORTANT FIX:
-            # - update_streamlit=False reduces heavy reruns/blurry UI while drawing
-            # - ink detection made more sensitive; plus we persist last_canvas_image_data on submit
-            with st.form(key=f"write_form_{st.session_state['canvas_key']}"):
-                canvas_result = st_canvas(
-                    stroke_width=stroke_width,
-                    stroke_color=stroke_color,
-                    background_color=CANVAS_BG_HEX,
-                    height=400,
-                    width=600,
-                    drawing_mode="freedraw",
-                    key=f"canvas_{st.session_state['canvas_key']}",
-                    display_toolbar=False,
-                    update_streamlit=False,  # critical: do not rerun on every stroke
-                )
-                submitted_writing = st.form_submit_button("Submit Writing", type="primary", disabled=not AI_READY or not db_ready())
+    # IMPORTANT: update_streamlit=True so image_data is available on submit reliably
+    canvas_result = st_canvas(
+        stroke_width=stroke_width,
+        stroke_color=stroke_color,
+        background_color=CANVAS_BG_HEX,
+        height=400,
+        width=600,
+        drawing_mode="freedraw",
+        key=f"canvas_{st.session_state['canvas_key']}",
+        display_toolbar=False,
+        update_streamlit=True,   # critical fix
+    )
 
-            # If the frontend sends image_data in this run, cache it (helps robustness)
+    # Cache latest non-blank image_data as a fallback
+    if canvas_result is not None and getattr(canvas_result, "image_data", None) is not None:
+        if canvas_has_ink(canvas_result.image_data):
+            st.session_state["last_canvas_image_data"] = canvas_result.image_data
+
+    submitted_writing = st.button(
+        "Submit Writing",
+        type="primary",
+        disabled=not AI_READY or not db_ready(),
+        key="submit_writing_btn",
+    )
+
+    if submitted_writing:
+        sid = _effective_student_id(student_id)
+
+        if not q_row:
+            st.error("Please select a question first.")
+        else:
+            img_data = None
+
+            # Primary: use the returned image_data
             if canvas_result is not None and getattr(canvas_result, "image_data", None) is not None:
-                if canvas_has_ink(canvas_result.image_data):
-                    st.session_state["last_canvas_image_data"] = canvas_result.image_data
+                img_data = canvas_result.image_data
 
-            if submitted_writing:
-                sid = _effective_student_id(student_id)
+            # Fallback: last cached non-blank canvas
+            if img_data is None:
+                img_data = st.session_state.get("last_canvas_image_data")
 
-                if not q_row:
-                    st.error("Please select a question first.")
-                else:
-                    img_data = None
-                    if canvas_result is not None and getattr(canvas_result, "image_data", None) is not None:
-                        img_data = canvas_result.image_data
+            if img_data is None or (not canvas_has_ink(img_data)):
+                st.toast("Canvas is blank. Write your answer first, then press Submit.", icon="⚠️")
+                st.stop()
 
-                    # Fallback to last known image if Streamlit returns None on submit
-                    if img_data is None:
-                        img_data = st.session_state.get("last_canvas_image_data")
+            allowed_now, _, reset_str = check_rate_limit(sid)
+            if not allowed_now:
+                st.error(f"You’ve reached the limit of {RATE_LIMIT_MAX} submissions per hour. Please try again at {reset_str}.")
+                st.stop()
 
-                    # Second fallback: try to read from session_state for this canvas key (some versions store it)
-                    if img_data is None:
-                        maybe = st.session_state.get(f"canvas_{st.session_state['canvas_key']}")
-                        # some builds store a dict, sometimes under 'image_data'
-                        if isinstance(maybe, dict) and "image_data" in maybe:
-                            img_data = maybe.get("image_data")
+            img_for_ai = preprocess_canvas_image(img_data)
 
-                    if img_data is None or (not canvas_has_ink(img_data)):
-                        st.toast("Canvas is blank. Write your answer first, then press Submit.", icon="⚠️")
-                    else:
-                        allowed_now, _, reset_str = check_rate_limit(sid)
-                        if not allowed_now:
-                            st.error(f"You’ve reached the limit of {RATE_LIMIT_MAX} submissions per hour. Please try again at {reset_str}.")
-                        else:
-                            img_for_ai = preprocess_canvas_image(img_data)
+            # Keep file size small
+            canvas_bytes = _encode_image_bytes(img_for_ai, "JPEG", quality=80)
+            ok_canvas, msg_canvas = validate_image_file(canvas_bytes, CANVAS_MAX_MB, "canvas")
+            if not ok_canvas:
+                okc, outb, _outct, err = _compress_bytes_to_limit(
+                    canvas_bytes, CANVAS_MAX_MB, _purpose="canvas", prefer_fmt="JPEG"
+                )
+                if not okc:
+                    st.error(err or msg_canvas)
+                    st.stop()
+                img_for_ai = Image.open(io.BytesIO(outb)).convert("RGB")
 
-                            canvas_bytes = _encode_image_bytes(img_for_ai, "JPEG", quality=80)
-                            ok_canvas, msg_canvas = validate_image_file(canvas_bytes, CANVAS_MAX_MB, "canvas")
-                            if not ok_canvas:
-                                okc, outb, _outct, err = _compress_bytes_to_limit(
-                                    canvas_bytes, CANVAS_MAX_MB, _purpose="canvas", prefer_fmt="JPEG"
-                                )
-                                if not okc:
-                                    st.error(err or msg_canvas)
-                                    st.stop()
-                                img_for_ai = Image.open(io.BytesIO(outb)).convert("RGB")
+            increment_rate_limit(sid)
 
-                            increment_rate_limit(sid)
+            def task():
+                ms_path = st.session_state.get("cached_ms_path") or q_row.get("markscheme_image_path")
+                ms_bytes = download_from_storage(ms_path) if ms_path else b""
+                ms_img = bytes_to_pil(ms_bytes) if ms_bytes else None
+                return get_gpt_feedback_from_bank(
+                    student_answer=img_for_ai,
+                    q_row=q_row,
+                    is_student_image=True,
+                    question_img=question_img,
+                    markscheme_img=ms_img
+                )
 
-                            def task():
-                                ms_path = st.session_state.get("cached_ms_path") or q_row.get("markscheme_image_path")
-                                ms_bytes = download_from_storage(ms_path) if ms_path else b""
-                                ms_img = bytes_to_pil(ms_bytes) if ms_bytes else None
-                                return get_gpt_feedback_from_bank(
-                                    student_answer=img_for_ai,
-                                    q_row=q_row,
-                                    is_student_image=True,
-                                    question_img=question_img,
-                                    markscheme_img=ms_img
-                                )
+            st.session_state["feedback"] = _run_ai_with_progress(
+                task_fn=task,
+                ctx={"student_id": sid, "question": q_key or "", "mode": "writing"},
+                typical_range="8-15 seconds",
+                est_seconds=13.0
+            )
 
-                            st.session_state["feedback"] = _run_ai_with_progress(
-                                task_fn=task,
-                                ctx={"student_id": sid, "question": q_key or "", "mode": "writing"},
-                                typical_range="8-15 seconds",
-                                est_seconds=13.0
-                            )
-
-                            if db_ready() and q_key:
-                                insert_attempt(student_id, q_key, st.session_state["feedback"], mode="writing")
+            if db_ready() and q_key:
+                insert_attempt(student_id, q_key, st.session_state["feedback"], mode="writing")
 
     with col2:
         st.subheader("👨‍🏫 Report")
