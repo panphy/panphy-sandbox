@@ -147,6 +147,7 @@ create index if not exists idx_rate_limits_window_start_time
   on public.rate_limits (window_start_time);
 """.strip()
 
+# NOTE: No trigger/function here. Keeping DDL simple avoids "unterminated dollar-quoted string" errors.
 QUESTION_BANK_DDL = """
 create table if not exists public.question_bank_v1 (
   id bigserial primary key,
@@ -219,12 +220,6 @@ def get_supabase_client():
 def supabase_ready() -> bool:
     return get_supabase_client() is not None
 
-
-def supabase_fp() -> str:
-    # cache fingerprint to isolate environments
-    return (st.secrets.get("SUPABASE_URL", "") or "")[:40]
-
-
 # =========================
 # --- SESSION STATE ---
 # =========================
@@ -251,10 +246,6 @@ _ss_init("cached_question_img", None)
 _ss_init("cached_q_path", None)
 _ss_init("cached_ms_path", None)
 
-# Per-source selection memory (prevents cross-source leakage)
-_ss_init("student_last_source", None)
-_ss_init("student_assignment_by_source", {})
-
 # AI generator draft cache (teacher-only)
 _ss_init("ai_draft", None)
 
@@ -263,11 +254,11 @@ _ss_init("ai_draft", None)
 # ============================================================
 def get_db_driver_type():
     try:
-        import psycopg  # noqa
+        import psycopg  # noqa: F401
         return "psycopg"
     except ImportError:
         try:
-            import psycopg2  # noqa
+            import psycopg2  # noqa: F401
             return "psycopg2"
         except ImportError:
             return None
@@ -322,8 +313,8 @@ def _split_sql_statements(sql_blob: str) -> List[str]:
     This is enough for our simple DDL blobs (no $$ blocks in-app).
     """
     s = sql_blob or ""
-    out = []
-    buf = []
+    out: List[str] = []
+    buf: List[str] = []
     in_sq = False
     in_dq = False
     esc = False
@@ -531,6 +522,7 @@ def _check_rate_limit_db(student_id: str) -> Tuple[bool, int, str]:
 
 @st.cache_data(ttl=15)
 def check_rate_limit_cached(student_id: str, _fp: str) -> Tuple[bool, int, str]:
+    # Cached "display" check only (not used for enforcement).
     try:
         return _check_rate_limit_db(student_id)
     except Exception:
@@ -609,12 +601,12 @@ def upload_to_storage(path: str, file_bytes: bytes, content_type: str) -> bool:
         st.session_state["db_last_error"] = "Storage Upload Error: empty path."
         return False
 
+    # Header values must be strings (avoid booleans).
     file_options = {
         "contentType": str(content_type),
         "content-type": str(content_type),
         "cacheControl": "3600",
         "cache-control": "3600",
-        # NEVER pass booleans in headers
         "upsert": "true",
         "x-upsert": "true",
     }
@@ -685,7 +677,6 @@ def download_from_storage(path: str) -> bytes:
 
 @st.cache_data(ttl=300)
 def cached_download_from_storage(path: str, _fp: str = "") -> bytes:
-    # _fp is a fingerprint (e.g. SUPABASE_URL) to isolate environments.
     return download_from_storage(path)
 
 
@@ -816,8 +807,8 @@ def _compress_bytes_to_limit(
 # ============================================================
 def canvas_has_ink(image_data: np.ndarray) -> bool:
     """
-    Reliable detection (light pencil strokes / iPad):
-    uses per-channel max difference vs background and counts pixels above threshold.
+    More reliable detection (especially for light pencil strokes / iPad).
+    Uses per-channel max difference against background and counts pixels.
     """
     if image_data is None:
         return False
@@ -1003,18 +994,23 @@ def load_attempts_df(limit: int = 5000) -> pd.DataFrame:
 
 @st.cache_data(ttl=30)
 def load_question_bank_df_cached(_fp: str, limit: int = 5000, include_inactive: bool = False) -> pd.DataFrame:
+    """
+    NOTE: This returns a *summary* table for listing/filtering, so we include
+    light metadata + tags/question_text (for search). Full row is loaded by id.
+    """
     eng = get_db_engine()
     if eng is None:
         return pd.DataFrame()
     ensure_question_bank_table()
     where = "" if include_inactive else "where is_active = true"
-    # Include tags and question_text so browsing filters actually work.
     with eng.connect() as conn:
         df = pd.read_sql(
             text(f"""
                 select
-                  id, created_at, source, assignment_name, question_label, max_marks, is_active,
-                  tags, question_text
+                  id, created_at, updated_at,
+                  source, assignment_name, question_label,
+                  max_marks, tags, question_text,
+                  is_active
                 from public.question_bank_v1
                 {where}
                 order by created_at desc
@@ -1313,7 +1309,7 @@ def generate_practice_question_with_ai(
         return bad
 
     def _validate(d: Dict[str, Any]) -> Tuple[bool, List[str]]:
-        reasons = []
+        reasons: List[str] = []
         qtxt = str(d.get("question_text", "") or "").strip()
         mstxt = str(d.get("markscheme_text", "") or "").strip()
 
@@ -1527,18 +1523,6 @@ if nav == "🧑‍🎓 Student":
                 key="student_id",
             )
 
-        # If source changed, aggressively reset dependent UI and cached selection
-        if st.session_state.get("student_last_source") != source:
-            st.session_state["student_last_source"] = source
-            st.session_state["selected_qid"] = None
-            st.session_state["cached_q_row"] = None
-            st.session_state["cached_question_img"] = None
-            st.session_state["cached_q_path"] = None
-            st.session_state["cached_ms_path"] = None
-            st.session_state["feedback"] = None
-            st.session_state["canvas_key"] += 1
-            st.session_state["last_canvas_image_data"] = None
-
         if not db_ready():
             st.error("Database not ready. Configure DATABASE_URL first.")
         else:
@@ -1555,27 +1539,11 @@ if nav == "🧑‍🎓 Student":
 
                 if df_src.empty:
                     st.info("No questions available for this source yet.")
-                    st.session_state["selected_qid"] = None
-                    st.session_state["cached_q_row"] = None
                 else:
                     assignments = ["All"] + sorted(df_src["assignment_name"].dropna().unique().tolist())
-
-                    # per-source assignment selection memory to prevent cross-source invalid values
-                    asg_mem = st.session_state.get("student_assignment_by_source", {})
-                    if not isinstance(asg_mem, dict):
-                        asg_mem = {}
-                    default_asg = asg_mem.get(source, "All")
-                    if default_asg not in assignments:
-                        default_asg = "All"
-
-                    assignment_filter = st.selectbox(
-                        "Assignment",
-                        assignments,
-                        index=assignments.index(default_asg),
-                        key=f"student_assignment_filter::{source}",
-                    )
-                    asg_mem[source] = assignment_filter
-                    st.session_state["student_assignment_by_source"] = asg_mem
+                    if st.session_state.get("student_assignment_filter") not in assignments:
+                        st.session_state["student_assignment_filter"] = "All"
+                    assignment_filter = st.selectbox("Assignment", assignments, key="student_assignment_filter")
 
                     if assignment_filter != "All":
                         df2 = df_src[df_src["assignment_name"] == assignment_filter].copy()
@@ -1584,8 +1552,6 @@ if nav == "🧑‍🎓 Student":
 
                     if df2.empty:
                         st.info("No questions available for this assignment.")
-                        st.session_state["selected_qid"] = None
-                        st.session_state["cached_q_row"] = None
                     else:
                         df2 = df2.sort_values(["assignment_name", "question_label", "id"], kind="mergesort")
                         df2["label"] = df2.apply(
@@ -1595,7 +1561,6 @@ if nav == "🧑‍🎓 Student":
                         choices = df2["label"].tolist()
                         labels_map = dict(zip(df2["label"], df2["id"]))
 
-                        # Key varies with filters so Streamlit never keeps an invalid selection.
                         choice_key = f"student_question_choice::{source}::{assignment_filter}"
                         if st.session_state.get(choice_key) not in choices:
                             st.session_state[choice_key] = choices[0]
@@ -1615,7 +1580,8 @@ if nav == "🧑‍🎓 Student":
 
                                 q_path = (st.session_state.get("cached_q_path") or "").strip()
                                 if q_path:
-                                    q_bytes = cached_download_from_storage(q_path, supabase_fp())
+                                    fp = (st.secrets.get("SUPABASE_URL", "") or "")[:40]
+                                    q_bytes = cached_download_from_storage(q_path, fp)
                                     st.session_state["cached_question_img"] = safe_bytes_to_pil(q_bytes)
                                 else:
                                     st.session_state["cached_question_img"] = None
@@ -1685,7 +1651,8 @@ if nav == "🧑‍🎓 Student":
                             ms_path = (st.session_state.get("cached_ms_path") or q_row.get("markscheme_image_path") or "").strip()
                             ms_img = None
                             if ms_path:
-                                ms_bytes = cached_download_from_storage(ms_path, supabase_fp())
+                                fp = (st.secrets.get("SUPABASE_URL", "") or "")[:40]
+                                ms_bytes = cached_download_from_storage(ms_path, fp)
                                 ms_img = bytes_to_pil(ms_bytes) if ms_bytes else None
                             return get_gpt_feedback_from_bank(
                                 student_answer=answer,
@@ -1786,7 +1753,8 @@ if nav == "🧑‍🎓 Student":
                         ms_path = (st.session_state.get("cached_ms_path") or q_row.get("markscheme_image_path") or "").strip()
                         ms_img = None
                         if ms_path:
-                            ms_bytes = cached_download_from_storage(ms_path, supabase_fp())
+                            fp = (st.secrets.get("SUPABASE_URL", "") or "")[:40]
+                            ms_bytes = cached_download_from_storage(ms_path, fp)
                             ms_img = bytes_to_pil(ms_bytes) if ms_bytes else None
                         return get_gpt_feedback_from_bank(
                             student_answer=img_for_ai,
@@ -1809,7 +1777,7 @@ if nav == "🧑‍🎓 Student":
     with col2:
         st.subheader("👨‍🏫 Report")
         with st.container(border=True):
-            if st.session_state.get("feedback"):
+            if st.session_state["feedback"]:
                 render_report(st.session_state["feedback"])
                 st.divider()
                 if st.button("Start New Attempt", use_container_width=True, key="new_attempt"):
@@ -1836,8 +1804,9 @@ elif nav == "🔒 Teacher Dashboard":
                 pass
             st.session_state["db_table_ready"] = False
             st.session_state["bank_table_ready"] = False
+            st.session_state["cached_q_row"] = None
+            st.session_state["selected_qid"] = None
             st.rerun()
-
         if st.session_state.get("db_last_error"):
             st.write("Last DB error:")
             st.code(st.session_state["db_last_error"])
@@ -1910,8 +1879,8 @@ else:
                 pass
             st.session_state["db_table_ready"] = False
             st.session_state["bank_table_ready"] = False
+            st.session_state["ai_draft"] = None
             st.rerun()
-
         if st.session_state.get("db_last_error"):
             st.write("Last DB error:")
             st.code(st.session_state["db_last_error"])
@@ -1930,10 +1899,13 @@ else:
             ensure_question_bank_table()
 
             st.write("### Question Bank manager")
-            st.caption("Use the tabs below to (1) browse and preview what is already in the bank, (2) generate AI practice questions, or (3) upload scanned questions.")
+            st.caption("Use the tabs below to (1) browse and preview what is already in the bank, (2) generate AI practice questions, or (3) upload scanned questions. All features are unchanged, only reorganised.")
 
             tab_browse, tab_ai, tab_upload = st.tabs(["🔎 Browse & preview", "🤖 AI generator", "🖼️ Upload scans"])
 
+            # -------------------------
+            # Browse & preview
+            # -------------------------
             with tab_browse:
                 st.write("## 🔎 Browse & preview")
                 df_all = load_question_bank_df(limit=5000, include_inactive=False)
@@ -2024,12 +1996,12 @@ else:
                         q_img = None
                         q_path = row.get("question_image_path")
                         if isinstance(q_path, str) and q_path.strip():
-                            q_img = safe_bytes_to_pil(cached_download_from_storage(q_path, supabase_fp()))
+                            q_img = safe_bytes_to_pil(cached_download_from_storage(q_path))
 
                         ms_img = None
                         ms_path = row.get("markscheme_image_path")
                         if isinstance(ms_path, str) and ms_path.strip():
-                            ms_img = safe_bytes_to_pil(cached_download_from_storage(ms_path, supabase_fp()))
+                            ms_img = safe_bytes_to_pil(cached_download_from_storage(ms_path))
 
                         meta1, meta2, meta3, meta4 = st.columns([3, 2, 2, 1])
                         with meta1:
@@ -2066,8 +2038,14 @@ else:
                 st.divider()
                 st.write("### Recent question bank entries")
                 df_bank = load_question_bank_df(limit=50, include_inactive=False)
-                st.dataframe(df_bank[["created_at", "source", "assignment_name", "question_label", "max_marks", "id"]], use_container_width=True)
+                if not df_bank.empty:
+                    st.dataframe(df_bank[["created_at", "source", "assignment_name", "question_label", "max_marks", "id"]], use_container_width=True)
+                else:
+                    st.info("No recent entries.")
 
+            # -------------------------
+            # AI generator
+            # -------------------------
             with tab_ai:
                 st.write("## 🤖 Generate practice question with AI (teacher vetting required)")
 
@@ -2138,7 +2116,7 @@ else:
                             default_label = f"AI-{slugify(topic_text)[:24]}-{token}"
 
                             st.session_state["ai_draft"] = {
-                                "assignment_name": assignment_name_ai.strip() or "AI Practice",
+                                "assignment_name": (assignment_name_ai or "").strip() or "AI Practice",
                                 "question_label": default_label,
                                 "max_marks": int(mm),
                                 "tags": [str(t).strip() for t in tags if str(t).strip()][:10],
@@ -2208,6 +2186,9 @@ else:
 
                 st.divider()
 
+            # -------------------------
+            # Upload scans
+            # -------------------------
             with tab_upload:
                 st.write("## 🖼️ Upload a teacher question (images)")
                 st.caption("Optional question text supports Markdown and LaTeX ($...$).")
