@@ -1981,312 +1981,98 @@ if nav == "🧑‍🎓 Student":
             st.caption(f"Max Marks: {max_marks}")
 
             st.write("")
-            st.markdown("**Answer (typed)**")
-            answer = st.text_area("Type your working:", height=200, placeholder="Enter your answer here...", key="student_answer_text")
+            tab_type, tab_write = st.tabs(["⌨️ Type Answer", "✍️ Write Answer"])
+            with tab_type:
+                st.markdown("**Answer (typed)**")
+                answer = st.text_area("Type your working:", height=200, placeholder="Enter your answer here...", key="student_answer_text")
 
-            if st.button("Submit Text", type="primary", disabled=not AI_READY or not db_ready(), key="submit_text_btn"):
-                sid = _effective_student_id(student_id)
+                if st.button("Submit Text", type="primary", disabled=not AI_READY or not db_ready(), key="submit_text_btn"):
+                    sid = _effective_student_id(student_id)
 
-                if not answer.strip():
-                    st.toast("Please type an answer first.", icon="⚠️")
-                elif not q_row:
-                    st.error("Please select a question first.")
-                else:
-                    try:
-                        allowed_now, _, reset_str = _check_rate_limit_db(sid)
-                    except Exception:
-                        allowed_now, reset_str = True, ""
-                    if not allowed_now:
-                        st.error(f"You’ve reached the limit of {RATE_LIMIT_MAX} submissions per hour. Please try again at {reset_str}.")
+                    if not answer.strip():
+                        st.toast("Please type an answer first.", icon="⚠️")
+                    elif not q_row:
+                        st.error("Please select a question first.")
                     else:
-                        increment_rate_limit(sid)
-
-                        def task():
-                            ms_path = (st.session_state.get("cached_ms_path") or q_row.get("markscheme_image_path") or "").strip()
-                            ms_img = None
-                            if ms_path:
-                                fp = (st.secrets.get("SUPABASE_URL", "") or "")[:40]
-                                ms_bytes = cached_download_from_storage(ms_path, fp)
-                                ms_img = bytes_to_pil(ms_bytes) if ms_bytes else None
-                            return get_gpt_feedback_from_bank(
-                                student_answer=answer,
-                                q_row=q_row,
-                                is_student_image=False,
-                                question_img=question_img,
-                                markscheme_img=ms_img
-                            )
-
-                        st.session_state["feedback"] = _run_ai_with_progress(
-                            task_fn=task,
-                            ctx={"student_id": sid, "question": q_key or "", "mode": "text"},
-                            typical_range="5-10 seconds",
-                            est_seconds=9.0
-                        )
-
-                        if db_ready() and q_key:
-                            insert_attempt(student_id, q_key, st.session_state["feedback"], mode="text", question_bank_id=qid)
-
-            st.write("")
-            st.markdown("**Answer (write/draw)**")
-            tool_row = st.columns([2, 1])
-            with tool_row[0]:
-                tool = st.radio("Tool", ["Pen", "Eraser"], horizontal=True, label_visibility="collapsed", key="canvas_tool")
-            clear_clicked = tool_row[1].button("🗑️ Clear", use_container_width=True, key="canvas_clear")
-
-            if clear_clicked:
-                st.session_state["feedback"] = None
-                st.session_state["last_canvas_image_data"] = None
-                st.session_state["canvas_key"] += 1
-                st.rerun()
-
-            stroke_width = 2 if tool == "Pen" else 30
-            stroke_color = "#000000" if tool == "Pen" else CANVAS_BG_HEX
-
-            canvas_result = st_canvas(
-                stroke_width=stroke_width,
-                stroke_color=stroke_color,
-                background_color=CANVAS_BG_HEX,
-                height=400,
-                width=600,
-                drawing_mode="freedraw",
-                key=f"canvas_{st.session_state['canvas_key']}",
-                display_toolbar=False,
-                update_streamlit=True,
-            )
-
-            if canvas_result is not None and getattr(canvas_result, "image_data", None) is not None:
-                if canvas_has_ink(canvas_result.image_data):
-                    st.session_state["last_canvas_image_data"] = canvas_result.image_data
-
-            submitted_writing = st.button(
-                "Submit Writing",
-                type="primary",
-                disabled=not AI_READY or not db_ready(),
-                key="submit_writing_btn",
-            )
-
-            if submitted_writing:
-                sid = _effective_student_id(student_id)
-
-                if not q_row:
-                    st.error("Please select a question first.")
-                else:
-                    img_data = None
-                    if canvas_result is not None and getattr(canvas_result, "image_data", None) is not None:
-                        img_data = canvas_result.image_data
-                    if img_data is None:
-                        img_data = st.session_state.get("last_canvas_image_data")
-
-                    if img_data is None or (not canvas_has_ink(img_data)):
-                        st.toast("Canvas is blank. Write your answer first, then press Submit.", icon="⚠️")
-                        st.stop()
-
-                    try:
-                        allowed_now, _, reset_str = _check_rate_limit_db(sid)
-                    except Exception:
-                        allowed_now, reset_str = True, ""
-                    if not allowed_now:
-                        st.error(f"You’ve reached the limit of {RATE_LIMIT_MAX} submissions per hour. Please try again at {reset_str}.")
-                        st.stop()
-
-                    img_for_ai = preprocess_canvas_image(img_data)
-
-                    canvas_bytes = _encode_image_bytes(img_for_ai, "JPEG", quality=80)
-                    ok_canvas, msg_canvas = validate_image_file(canvas_bytes, CANVAS_MAX_MB, "canvas")
-                    if not ok_canvas:
-                        okc, outb, _outct, err = _compress_bytes_to_limit(
-                            canvas_bytes, CANVAS_MAX_MB, _purpose="canvas", prefer_fmt="JPEG"
-                        )
-                        if not okc:
-                            st.error(err or msg_canvas)
-                            st.stop()
-                        img_for_ai = Image.open(io.BytesIO(outb)).convert("RGB")
-
-                    increment_rate_limit(sid)
-
-                    def task():
-                        ms_path = (st.session_state.get("cached_ms_path") or q_row.get("markscheme_image_path") or "").strip()
-                        ms_img = None
-                        if ms_path:
-                            fp = (st.secrets.get("SUPABASE_URL", "") or "")[:40]
-                            ms_bytes = cached_download_from_storage(ms_path, fp)
-                            ms_img = bytes_to_pil(ms_bytes) if ms_bytes else None
-                        return get_gpt_feedback_from_bank(
-                            student_answer=img_for_ai,
-                            q_row=q_row,
-                            is_student_image=True,
-                            question_img=question_img,
-                            markscheme_img=ms_img
-                        )
-
-                    st.session_state["feedback"] = _run_ai_with_progress(
-                        task_fn=task,
-                        ctx={"student_id": sid, "question": q_key or "", "mode": "writing"},
-                        typical_range="8-15 seconds",
-                        est_seconds=13.0
-                    )
-
-                    if db_ready() and q_key:
-                        insert_attempt(student_id, q_key, st.session_state["feedback"], mode="writing", question_bank_id=qid)
-
-        else:
-            # -------------------------
-            # Topic Journey student flow (one step at a time)
-            # -------------------------
-            st.subheader("🧭 Topic Journey")
-            if not isinstance(journey_obj, dict) or not journey_obj.get("steps"):
-                st.error("This Topic Journey is missing its steps JSON.")
-            else:
-                steps = journey_obj.get("steps", [])
-                if not isinstance(steps, list) or not steps:
-                    st.error("This Topic Journey has no steps.")
-                else:
-                    step_i = int(st.session_state.get("journey_step_index", 0) or 0)
-                    step_i = max(0, min(step_i, len(steps) - 1))
-                    st.session_state["journey_step_index"] = step_i
-
-                    checkpoint_every = int(journey_obj.get("checkpoint_every", JOURNEY_CHECKPOINT_EVERY) or JOURNEY_CHECKPOINT_EVERY)
-
-                    st.caption(f"Step {step_i + 1} of {len(steps)}")
-                    step = steps[step_i] if step_i < len(steps) else {}
-
-                    obj = str(step.get("objective", "") or "").strip()
-                    qtxt = str(step.get("question_text", "") or "").strip()
-                    mm = clamp_int(step.get("max_marks", 1), 1, 50, default=1)
-
-                    with st.container(border=True):
-                        if obj:
-                            st.markdown(normalize_markdown_math(f"**Objective:** {obj}"))
-                        if qtxt:
-                            st.markdown(normalize_markdown_math(qtxt))
+                        try:
+                            allowed_now, _, reset_str = _check_rate_limit_db(sid)
+                        except Exception:
+                            allowed_now, reset_str = True, ""
+                        if not allowed_now:
+                            st.error(f"You’ve reached the limit of {RATE_LIMIT_MAX} submissions per hour. Please try again at {reset_str}.")
                         else:
-                            st.warning("This step has no question text.")
+                            increment_rate_limit(sid)
 
-                    st.caption(f"Max Marks (this step): {mm}")
-
-                    st.write("")
-
-                    # Build a step-level "q_row" compatible with the marker
-                    step_q_row = {
-                        "max_marks": int(mm),
-                        "question_text": qtxt,
-                        "markscheme_text": str(step.get("markscheme_text", "") or "").strip(),
-                    }
-
-                    st.markdown("**Answer (typed)**")
-                    answer = st.text_area("Type your working:", height=200, placeholder="Enter your answer here...", key="student_answer_text")
-
-                    if st.button("Submit Text", type="primary", disabled=not AI_READY or not db_ready(), key="submit_text_btn"):
-                        sid = _effective_student_id(student_id)
-
-                        if not answer.strip():
-                            st.toast("Please type an answer first.", icon="⚠️")
-                        else:
-                            try:
-                                allowed_now, _, reset_str = _check_rate_limit_db(sid)
-                            except Exception:
-                                allowed_now, reset_str = True, ""
-                            if not allowed_now:
-                                st.error(f"You’ve reached the limit of {RATE_LIMIT_MAX} submissions per hour. Please try again at {reset_str}.")
-                            else:
-                                increment_rate_limit(sid)
-
-                                def task():
-                                    return get_gpt_feedback_from_bank(
-                                        student_answer=answer,
-                                        q_row=step_q_row,
-                                        is_student_image=False,
-                                        question_img=None,
-                                        markscheme_img=None
-                                    )
-
-                                st.session_state["feedback"] = _run_ai_with_progress(
-                                    task_fn=task,
-                                    ctx={"student_id": sid, "question": q_key or "", "mode": f"journey_text_s{step_i}"},
-                                    typical_range="5-10 seconds",
-                                    est_seconds=9.0
+                            def task():
+                                ms_path = (st.session_state.get("cached_ms_path") or q_row.get("markscheme_image_path") or "").strip()
+                                ms_img = None
+                                if ms_path:
+                                    fp = (st.secrets.get("SUPABASE_URL", "") or "")[:40]
+                                    ms_bytes = cached_download_from_storage(ms_path, fp)
+                                    ms_img = bytes_to_pil(ms_bytes) if ms_bytes else None
+                                return get_gpt_feedback_from_bank(
+                                    student_answer=answer,
+                                    q_row=q_row,
+                                    is_student_image=False,
+                                    question_img=question_img,
+                                    markscheme_img=ms_img
                                 )
 
-                                # Store step report history
-                                reports = st.session_state.get("journey_step_reports", [])
-                                if not isinstance(reports, list):
-                                    reports = []
-                                while len(reports) <= step_i:
-                                    reports.append(None)
-                                reports[step_i] = st.session_state["feedback"]
-                                st.session_state["journey_step_reports"] = reports
+                            st.session_state["feedback"] = _run_ai_with_progress(
+                                task_fn=task,
+                                ctx={"student_id": sid, "question": q_key or "", "mode": "text"},
+                                typical_range="5-10 seconds",
+                                est_seconds=9.0
+                            )
 
-                                # Create checkpoint notes (no extra AI call, deterministic)
-                                if ((step_i + 1) % checkpoint_every == 0) or (step_i == len(steps) - 1):
-                                    last_reports = [r for r in reports[max(0, step_i - (checkpoint_every - 1)) : step_i + 1] if isinstance(r, dict)]
-                                    mastered = []
-                                    improve = []
-                                    for r in last_reports:
-                                        # heuristically: if full marks, treat next_steps as "stretch", otherwise focus on next_steps
-                                        if int(r.get("marks_awarded", 0)) >= int(r.get("max_marks", 1)):
-                                            mastered.extend(r.get("feedback_points", [])[:2])
-                                        else:
-                                            improve.extend(r.get("next_steps", [])[:3])
-                                    mastered = [m for m in mastered if str(m).strip()][:6]
-                                    improve = [n for n in improve if str(n).strip()][:6]
+                            if db_ready() and q_key:
+                                insert_attempt(student_id, q_key, st.session_state["feedback"], mode="text", question_bank_id=qid)
 
-                                    md = "### Checkpoint\n"
-                                    md += "**Mastered (recent):**\n"
-                                    md += "\n".join([f"- {x}" for x in mastered]) if mastered else "- (keep going - you're building foundations)"
-                                    md += "\n\n**Next improvements:**\n"
-                                    md += "\n".join([f"- {x}" for x in improve]) if improve else "- (no major issues detected in recent steps)"
+            with tab_write:
+                st.markdown("**Answer (write/draw)**")
+                tool_row = st.columns([2, 1])
+                with tool_row[0]:
+                    tool = st.radio("Tool", ["Pen", "Eraser"], horizontal=True, label_visibility="collapsed", key="canvas_tool")
+                clear_clicked = tool_row[1].button("🗑️ Clear", use_container_width=True, key="canvas_clear")
 
-                                    notes = st.session_state.get("journey_checkpoint_notes", {}) or {}
-                                    if not isinstance(notes, dict):
-                                        notes = {}
-                                    notes[str(step_i)] = md
-                                    st.session_state["journey_checkpoint_notes"] = notes
+                if clear_clicked:
+                    st.session_state["feedback"] = None
+                    st.session_state["last_canvas_image_data"] = None
+                    st.session_state["canvas_key"] += 1
+                    st.rerun()
 
-                                if db_ready() and q_key:
-                                    insert_attempt(student_id, q_key, st.session_state["feedback"], mode="journey_text", question_bank_id=qid, step_index=step_i)
+                stroke_width = 2 if tool == "Pen" else 30
+                stroke_color = "#000000" if tool == "Pen" else CANVAS_BG_HEX
 
-                    st.write("")
-                    st.markdown("**Answer (write/draw)**")
-                    tool_row = st.columns([2, 1])
-                    with tool_row[0]:
-                        tool = st.radio("Tool", ["Pen", "Eraser"], horizontal=True, label_visibility="collapsed", key="canvas_tool")
-                    clear_clicked = tool_row[1].button("🗑️ Clear", use_container_width=True, key="canvas_clear")
+                canvas_result = st_canvas(
+                    stroke_width=stroke_width,
+                    stroke_color=stroke_color,
+                    background_color=CANVAS_BG_HEX,
+                    height=400,
+                    width=600,
+                    drawing_mode="freedraw",
+                    key=f"canvas_{st.session_state['canvas_key']}",
+                    display_toolbar=False,
+                    update_streamlit=True,
+                )
 
-                    if clear_clicked:
-                        st.session_state["feedback"] = None
-                        st.session_state["last_canvas_image_data"] = None
-                        st.session_state["canvas_key"] += 1
-                        st.rerun()
+                if canvas_result is not None and getattr(canvas_result, "image_data", None) is not None:
+                    if canvas_has_ink(canvas_result.image_data):
+                        st.session_state["last_canvas_image_data"] = canvas_result.image_data
 
-                    stroke_width = 2 if tool == "Pen" else 30
-                    stroke_color = "#000000" if tool == "Pen" else CANVAS_BG_HEX
+                submitted_writing = st.button(
+                    "Submit Writing",
+                    type="primary",
+                    disabled=not AI_READY or not db_ready(),
+                    key="submit_writing_btn",
+                )
 
-                    canvas_result = st_canvas(
-                        stroke_width=stroke_width,
-                        stroke_color=stroke_color,
-                        background_color=CANVAS_BG_HEX,
-                        height=400,
-                        width=600,
-                        drawing_mode="freedraw",
-                        key=f"canvas_{st.session_state['canvas_key']}",
-                        display_toolbar=False,
-                        update_streamlit=True,
-                    )
+                if submitted_writing:
+                    sid = _effective_student_id(student_id)
 
-                    if canvas_result is not None and getattr(canvas_result, "image_data", None) is not None:
-                        if canvas_has_ink(canvas_result.image_data):
-                            st.session_state["last_canvas_image_data"] = canvas_result.image_data
-
-                    submitted_writing = st.button(
-                        "Submit Writing",
-                        type="primary",
-                        disabled=not AI_READY or not db_ready(),
-                        key="submit_writing_btn",
-                    )
-
-                    if submitted_writing:
-                        sid = _effective_student_id(student_id)
-
+                    if not q_row:
+                        st.error("Please select a question first.")
+                    else:
                         img_data = None
                         if canvas_result is not None and getattr(canvas_result, "image_data", None) is not None:
                             img_data = canvas_result.image_data
@@ -2321,57 +2107,273 @@ if nav == "🧑‍🎓 Student":
                         increment_rate_limit(sid)
 
                         def task():
+                            ms_path = (st.session_state.get("cached_ms_path") or q_row.get("markscheme_image_path") or "").strip()
+                            ms_img = None
+                            if ms_path:
+                                fp = (st.secrets.get("SUPABASE_URL", "") or "")[:40]
+                                ms_bytes = cached_download_from_storage(ms_path, fp)
+                                ms_img = bytes_to_pil(ms_bytes) if ms_bytes else None
                             return get_gpt_feedback_from_bank(
                                 student_answer=img_for_ai,
-                                q_row=step_q_row,
+                                q_row=q_row,
                                 is_student_image=True,
-                                question_img=None,
-                                markscheme_img=None
+                                question_img=question_img,
+                                markscheme_img=ms_img
                             )
 
                         st.session_state["feedback"] = _run_ai_with_progress(
                             task_fn=task,
-                            ctx={"student_id": sid, "question": q_key or "", "mode": f"journey_writing_s{step_i}"},
+                            ctx={"student_id": sid, "question": q_key or "", "mode": "writing"},
                             typical_range="8-15 seconds",
                             est_seconds=13.0
                         )
 
-                        # Store step report history
-                        reports = st.session_state.get("journey_step_reports", [])
-                        if not isinstance(reports, list):
-                            reports = []
-                        while len(reports) <= step_i:
-                            reports.append(None)
-                        reports[step_i] = st.session_state["feedback"]
-                        st.session_state["journey_step_reports"] = reports
-
-                        # Create checkpoint notes (deterministic)
-                        if ((step_i + 1) % checkpoint_every == 0) or (step_i == len(steps) - 1):
-                            last_reports = [r for r in reports[max(0, step_i - (checkpoint_every - 1)) : step_i + 1] if isinstance(r, dict)]
-                            mastered = []
-                            improve = []
-                            for r in last_reports:
-                                if int(r.get("marks_awarded", 0)) >= int(r.get("max_marks", 1)):
-                                    mastered.extend(r.get("feedback_points", [])[:2])
-                                else:
-                                    improve.extend(r.get("next_steps", [])[:3])
-                            mastered = [m for m in mastered if str(m).strip()][:6]
-                            improve = [n for n in improve if str(n).strip()][:6]
-
-                            md = "### Checkpoint\n"
-                            md += "**Mastered (recent):**\n"
-                            md += "\n".join([f"- {x}" for x in mastered]) if mastered else "- (keep going - you're building foundations)"
-                            md += "\n\n**Next improvements:**\n"
-                            md += "\n".join([f"- {x}" for x in improve]) if improve else "- (no major issues detected in recent steps)"
-
-                            notes = st.session_state.get("journey_checkpoint_notes", {}) or {}
-                            if not isinstance(notes, dict):
-                                notes = {}
-                            notes[str(step_i)] = md
-                            st.session_state["journey_checkpoint_notes"] = notes
-
                         if db_ready() and q_key:
-                            insert_attempt(student_id, q_key, st.session_state["feedback"], mode="journey_writing", question_bank_id=qid, step_index=step_i)
+                            insert_attempt(student_id, q_key, st.session_state["feedback"], mode="writing", question_bank_id=qid)
+
+                        else:
+                # -------------------------
+                # Topic Journey student flow (one step at a time)
+                # -------------------------
+                st.subheader("🧭 Topic Journey")
+                if not isinstance(journey_obj, dict) or not journey_obj.get("steps"):
+                    st.error("This Topic Journey is missing its steps JSON.")
+                else:
+                    steps = journey_obj.get("steps", [])
+                    if not isinstance(steps, list) or not steps:
+                        st.error("This Topic Journey has no steps.")
+                    else:
+                        step_i = int(st.session_state.get("journey_step_index", 0) or 0)
+                        step_i = max(0, min(step_i, len(steps) - 1))
+                        st.session_state["journey_step_index"] = step_i
+
+                        checkpoint_every = int(journey_obj.get("checkpoint_every", JOURNEY_CHECKPOINT_EVERY) or JOURNEY_CHECKPOINT_EVERY)
+
+                        st.caption(f"Step {step_i + 1} of {len(steps)}")
+                        step = steps[step_i] if step_i < len(steps) else {}
+
+                        obj = str(step.get("objective", "") or "").strip()
+                        qtxt = str(step.get("question_text", "") or "").strip()
+                        mm = clamp_int(step.get("max_marks", 1), 1, 50, default=1)
+
+                        with st.container(border=True):
+                            if obj:
+                                st.markdown(normalize_markdown_math(f"**Objective:** {obj}"))
+                            if qtxt:
+                                st.markdown(normalize_markdown_math(qtxt))
+                            else:
+                                st.warning("This step has no question text.")
+
+                        st.caption(f"Max Marks (this step): {mm}")
+
+                        st.write("")
+
+                        # Build a step-level "q_row" compatible with the marker
+                        step_q_row = {
+                            "max_marks": int(mm),
+                            "question_text": qtxt,
+                            "markscheme_text": str(step.get("markscheme_text", "") or "").strip(),
+                        }
+
+                        st.markdown("**Answer (typed)**")
+                        answer = st.text_area("Type your working:", height=200, placeholder="Enter your answer here...", key="student_answer_text")
+
+                        if st.button("Submit Text", type="primary", disabled=not AI_READY or not db_ready(), key="submit_text_btn"):
+                            sid = _effective_student_id(student_id)
+
+                            if not answer.strip():
+                                st.toast("Please type an answer first.", icon="⚠️")
+                            else:
+                                try:
+                                    allowed_now, _, reset_str = _check_rate_limit_db(sid)
+                                except Exception:
+                                    allowed_now, reset_str = True, ""
+                                if not allowed_now:
+                                    st.error(f"You’ve reached the limit of {RATE_LIMIT_MAX} submissions per hour. Please try again at {reset_str}.")
+                                else:
+                                    increment_rate_limit(sid)
+
+                                    def task():
+                                        return get_gpt_feedback_from_bank(
+                                            student_answer=answer,
+                                            q_row=step_q_row,
+                                            is_student_image=False,
+                                            question_img=None,
+                                            markscheme_img=None
+                                        )
+
+                                    st.session_state["feedback"] = _run_ai_with_progress(
+                                        task_fn=task,
+                                        ctx={"student_id": sid, "question": q_key or "", "mode": f"journey_text_s{step_i}"},
+                                        typical_range="5-10 seconds",
+                                        est_seconds=9.0
+                                    )
+
+                                    # Store step report history
+                                    reports = st.session_state.get("journey_step_reports", [])
+                                    if not isinstance(reports, list):
+                                        reports = []
+                                    while len(reports) <= step_i:
+                                        reports.append(None)
+                                    reports[step_i] = st.session_state["feedback"]
+                                    st.session_state["journey_step_reports"] = reports
+
+                                    # Create checkpoint notes (no extra AI call, deterministic)
+                                    if ((step_i + 1) % checkpoint_every == 0) or (step_i == len(steps) - 1):
+                                        last_reports = [r for r in reports[max(0, step_i - (checkpoint_every - 1)) : step_i + 1] if isinstance(r, dict)]
+                                        mastered = []
+                                        improve = []
+                                        for r in last_reports:
+                                            # heuristically: if full marks, treat next_steps as "stretch", otherwise focus on next_steps
+                                            if int(r.get("marks_awarded", 0)) >= int(r.get("max_marks", 1)):
+                                                mastered.extend(r.get("feedback_points", [])[:2])
+                                            else:
+                                                improve.extend(r.get("next_steps", [])[:3])
+                                        mastered = [m for m in mastered if str(m).strip()][:6]
+                                        improve = [n for n in improve if str(n).strip()][:6]
+
+                                        md = "### Checkpoint\n"
+                                        md += "**Mastered (recent):**\n"
+                                        md += "\n".join([f"- {x}" for x in mastered]) if mastered else "- (keep going - you're building foundations)"
+                                        md += "\n\n**Next improvements:**\n"
+                                        md += "\n".join([f"- {x}" for x in improve]) if improve else "- (no major issues detected in recent steps)"
+
+                                        notes = st.session_state.get("journey_checkpoint_notes", {}) or {}
+                                        if not isinstance(notes, dict):
+                                            notes = {}
+                                        notes[str(step_i)] = md
+                                        st.session_state["journey_checkpoint_notes"] = notes
+
+                                    if db_ready() and q_key:
+                                        insert_attempt(student_id, q_key, st.session_state["feedback"], mode="journey_text", question_bank_id=qid, step_index=step_i)
+
+                        st.write("")
+                        st.markdown("**Answer (write/draw)**")
+                        tool_row = st.columns([2, 1])
+                        with tool_row[0]:
+                            tool = st.radio("Tool", ["Pen", "Eraser"], horizontal=True, label_visibility="collapsed", key="canvas_tool")
+                        clear_clicked = tool_row[1].button("🗑️ Clear", use_container_width=True, key="canvas_clear")
+
+                        if clear_clicked:
+                            st.session_state["feedback"] = None
+                            st.session_state["last_canvas_image_data"] = None
+                            st.session_state["canvas_key"] += 1
+                            st.rerun()
+
+                        stroke_width = 2 if tool == "Pen" else 30
+                        stroke_color = "#000000" if tool == "Pen" else CANVAS_BG_HEX
+
+                        canvas_result = st_canvas(
+                            stroke_width=stroke_width,
+                            stroke_color=stroke_color,
+                            background_color=CANVAS_BG_HEX,
+                            height=400,
+                            width=600,
+                            drawing_mode="freedraw",
+                            key=f"canvas_{st.session_state['canvas_key']}",
+                            display_toolbar=False,
+                            update_streamlit=True,
+                        )
+
+                        if canvas_result is not None and getattr(canvas_result, "image_data", None) is not None:
+                            if canvas_has_ink(canvas_result.image_data):
+                                st.session_state["last_canvas_image_data"] = canvas_result.image_data
+
+                        submitted_writing = st.button(
+                            "Submit Writing",
+                            type="primary",
+                            disabled=not AI_READY or not db_ready(),
+                            key="submit_writing_btn",
+                        )
+
+                        if submitted_writing:
+                            sid = _effective_student_id(student_id)
+
+                            img_data = None
+                            if canvas_result is not None and getattr(canvas_result, "image_data", None) is not None:
+                                img_data = canvas_result.image_data
+                            if img_data is None:
+                                img_data = st.session_state.get("last_canvas_image_data")
+
+                            if img_data is None or (not canvas_has_ink(img_data)):
+                                st.toast("Canvas is blank. Write your answer first, then press Submit.", icon="⚠️")
+                                st.stop()
+
+                            try:
+                                allowed_now, _, reset_str = _check_rate_limit_db(sid)
+                            except Exception:
+                                allowed_now, reset_str = True, ""
+                            if not allowed_now:
+                                st.error(f"You’ve reached the limit of {RATE_LIMIT_MAX} submissions per hour. Please try again at {reset_str}.")
+                                st.stop()
+
+                            img_for_ai = preprocess_canvas_image(img_data)
+
+                            canvas_bytes = _encode_image_bytes(img_for_ai, "JPEG", quality=80)
+                            ok_canvas, msg_canvas = validate_image_file(canvas_bytes, CANVAS_MAX_MB, "canvas")
+                            if not ok_canvas:
+                                okc, outb, _outct, err = _compress_bytes_to_limit(
+                                    canvas_bytes, CANVAS_MAX_MB, _purpose="canvas", prefer_fmt="JPEG"
+                                )
+                                if not okc:
+                                    st.error(err or msg_canvas)
+                                    st.stop()
+                                img_for_ai = Image.open(io.BytesIO(outb)).convert("RGB")
+
+                            increment_rate_limit(sid)
+
+                            def task():
+                                return get_gpt_feedback_from_bank(
+                                    student_answer=img_for_ai,
+                                    q_row=step_q_row,
+                                    is_student_image=True,
+                                    question_img=None,
+                                    markscheme_img=None
+                                )
+
+                            st.session_state["feedback"] = _run_ai_with_progress(
+                                task_fn=task,
+                                ctx={"student_id": sid, "question": q_key or "", "mode": f"journey_writing_s{step_i}"},
+                                typical_range="8-15 seconds",
+                                est_seconds=13.0
+                            )
+
+                            # Store step report history
+                            reports = st.session_state.get("journey_step_reports", [])
+                            if not isinstance(reports, list):
+                                reports = []
+                            while len(reports) <= step_i:
+                                reports.append(None)
+                            reports[step_i] = st.session_state["feedback"]
+                            st.session_state["journey_step_reports"] = reports
+
+                            # Create checkpoint notes (deterministic)
+                            if ((step_i + 1) % checkpoint_every == 0) or (step_i == len(steps) - 1):
+                                last_reports = [r for r in reports[max(0, step_i - (checkpoint_every - 1)) : step_i + 1] if isinstance(r, dict)]
+                                mastered = []
+                                improve = []
+                                for r in last_reports:
+                                    if int(r.get("marks_awarded", 0)) >= int(r.get("max_marks", 1)):
+                                        mastered.extend(r.get("feedback_points", [])[:2])
+                                    else:
+                                        improve.extend(r.get("next_steps", [])[:3])
+                                mastered = [m for m in mastered if str(m).strip()][:6]
+                                improve = [n for n in improve if str(n).strip()][:6]
+
+                                md = "### Checkpoint\n"
+                                md += "**Mastered (recent):**\n"
+                                md += "\n".join([f"- {x}" for x in mastered]) if mastered else "- (keep going - you're building foundations)"
+                                md += "\n\n**Next improvements:**\n"
+                                md += "\n".join([f"- {x}" for x in improve]) if improve else "- (no major issues detected in recent steps)"
+
+                                notes = st.session_state.get("journey_checkpoint_notes", {}) or {}
+                                if not isinstance(notes, dict):
+                                    notes = {}
+                                notes[str(step_i)] = md
+                                st.session_state["journey_checkpoint_notes"] = notes
+
+                            if db_ready() and q_key:
+                                insert_attempt(student_id, q_key, st.session_state["feedback"], mode="journey_writing", question_bank_id=qid, step_index=step_i)
 
 # -------------------------
     # RIGHT: Feedback
@@ -2398,32 +2400,38 @@ if nav == "🧑‍🎓 Student":
                     steps = (journey_obj or {}).get("steps", [])
                     total_steps = len(steps) if isinstance(steps, list) else 0
 
+                    def _reset_answer_inputs_for_step():
+                        st.session_state['last_canvas_image_data'] = None
+                        st.session_state['canvas_key'] = int(st.session_state.get('canvas_key', 0) or 0) + 1
+                        st.session_state['student_answer_text'] = ""
+
+                    def _journey_redo_cb():
+                        st.session_state['feedback'] = None
+                        _reset_answer_inputs_for_step()
+
+                    def _journey_next_cb(step_i: int, total_steps: int):
+                        st.session_state['feedback'] = None
+                        _reset_answer_inputs_for_step()
+                        st.session_state['journey_step_index'] = min(step_i + 1, max(0, total_steps - 1))
+
                     cbtn1, cbtn2 = st.columns(2)
                     with cbtn1:
-                        if st.button("Redo this step", use_container_width=True, key="journey_redo"):
-                            st.session_state["feedback"] = None
-                            st.session_state["last_canvas_image_data"] = None
-                            st.session_state["canvas_key"] += 1
-                            st.session_state["student_answer_text"] = ""
-                            st.rerun()
+                        st.button('Redo this step', use_container_width=True, key='journey_redo', on_click=_journey_redo_cb)
                     with cbtn2:
                         next_disabled = (total_steps <= 0) or (step_i >= total_steps - 1)
-                        label = "Finish" if next_disabled else "Next step"
-                        if st.button(label, use_container_width=True, disabled=next_disabled, key="journey_next"):
-                            st.session_state["feedback"] = None
-                            st.session_state["last_canvas_image_data"] = None
-                            st.session_state["canvas_key"] += 1
-                            st.session_state["student_answer_text"] = ""
-                            st.session_state["journey_step_index"] = min(step_i + 1, max(0, total_steps - 1))
-                            st.rerun()
+                        label = 'Finish' if next_disabled else 'Next step'
+                        st.button(label, use_container_width=True, disabled=next_disabled, key='journey_next', on_click=_journey_next_cb, args=(step_i, total_steps))
 
                     if total_steps > 0 and step_i >= total_steps - 1:
                         st.success("Journey complete! You can redo the final step, or choose a new assignment.")
                 else:
-                    if st.button("Start New Attempt", use_container_width=True, key="new_attempt"):
-                        st.session_state["feedback"] = None
-                        st.session_state["student_answer_text"] = ""
-                        st.rerun()
+                    def _new_attempt_cb():
+                        st.session_state['feedback'] = None
+                        st.session_state['last_canvas_image_data'] = None
+                        st.session_state['canvas_key'] = int(st.session_state.get('canvas_key', 0) or 0) + 1
+                        st.session_state['student_answer_text'] = ""
+
+                    st.button('Start New Attempt', use_container_width=True, key='new_attempt', on_click=_new_attempt_cb)
             else:
                 st.info("Submit an answer to receive feedback.")
 
