@@ -1922,7 +1922,7 @@ nav = st.sidebar.radio(
 header_left, header_mid, header_right = st.columns([3, 2, 1])
 with header_left:
     st.title("⚛️ PanPhy Skill Builder")
-    st.caption(f"Model: {MODEL_NAME}")
+    st.caption(f"Powered by OpenAI {MODEL_NAME}")
 with header_right:
     issues = []
     if not AI_READY:
