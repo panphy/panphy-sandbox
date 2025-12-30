@@ -193,16 +193,63 @@ def load_spec_pack(spec_path: str) -> Dict[str, Any]:
         raise FileNotFoundError(f"Spec pack not found at: {spec_path}")
     return json.loads(p.read_text(encoding="utf-8"))
 
-def build_spec_indexes(spec_pack: Dict[str, Any]) -> Tuple[Dict[str, str], Dict[str, bool]]:
+def build_spec_indexes(spec_pack: Optional[Dict[str, Any]]) -> Tuple[Dict[str, str], Dict[str, bool]]:
+    """Build lookup tables from a spec pack.
+
+    Be tolerant of different extractor outputs:
+    - allowed_topics as List[Dict{code,title,ht_only}]
+    - allowed_topics as Dict[code -> title|{title,ht_only}]
+    - allowed_topics as List[str] (we try to parse a leading code)
+    """
     code_to_title: Dict[str, str] = {}
     code_to_ht: Dict[str, bool] = {}
-    for t in (spec_pack.get("allowed_topics") or []):
-        code = str(t.get("code", "")).strip()
+
+    if not isinstance(spec_pack, dict):
+        return code_to_title, code_to_ht
+
+    topics = spec_pack.get("allowed_topics") or []
+    iterable: List[Any] = []
+
+    if isinstance(topics, dict):
+        # {"4.1": "Energy"} or {"4.1": {"title":..., "ht_only":...}}
+        for k, v in topics.items():
+            if isinstance(v, dict):
+                d = {"code": k, **v}
+            else:
+                d = {"code": k, "title": str(v)}
+            iterable.append(d)
+    elif isinstance(topics, list):
+        iterable = topics
+    else:
+        iterable = []
+
+    code_re = re.compile(r"^(\d+(?:\.\d+)*)")
+
+    for t in iterable:
+        if isinstance(t, dict):
+            code = str(t.get("code", "")).strip()
+            if not code:
+                continue
+            title = str(t.get("title", "")).strip()
+            ht = bool(t.get("ht_only", False))
+        elif isinstance(t, str):
+            s = t.strip()
+            m = code_re.match(s)
+            if not m:
+                continue
+            code = m.group(1)
+            title = s[len(code):].lstrip(" :-–—\t")
+            ht = False
+        else:
+            continue
+
         if not code:
             continue
-        code_to_title[code] = str(t.get("title", "")).strip()
-        code_to_ht[code] = bool(t.get("ht_only", False))
+        code_to_title[code] = title
+        code_to_ht[code] = ht
+
     return code_to_title, code_to_ht
+
 
 def spec_path_for_code(code: str, code_to_title: Dict[str, str]) -> List[Tuple[str, str]]:
     """
