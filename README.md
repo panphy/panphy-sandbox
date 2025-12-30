@@ -1,58 +1,56 @@
 # PanPhy Skill Builder
 
-PanPhy Skill Builder is a Streamlit web app for building, delivering, and marking physics exam-style questions. It supports two question sources:
+A Streamlit web app for GCSE Physics practice that combines:
+- AI-generated exam-style questions with mark schemes
+- Teacher-uploaded scanned questions and mark schemes
+- A student workspace for typed answers or handwritten working on a canvas
+- AI feedback that is rendered properly in Markdown and LaTeX
+- A Topic Journey mode for guided step-by-step practice
 
-- **AI generated questions** (Markdown + LaTeX formatted plain text)
-- **Teacher uploaded scans** (question image + mark scheme image)
-
-Students can answer using a **drawing canvas** and typed responses, then receive **AI-assisted marking** and feedback. Teachers can curate a question bank and review attempts in a dashboard.
+This repo is built to be practical for real classroom use: fast to deploy, simple to maintain, and designed to reduce “messing around” during submission by locking the UI while the AI is processing.
 
 ---
 
-## Key features
+## What this app does
 
-### Question bank (Teacher)
-- Browse, filter, and preview questions (AI generated and teacher uploaded)
-- AI question generation with editable output
-- Upload scanned question images and mark scheme images
-- Store question text as **plain text** that renders as **Markdown + LaTeX**
-
-### Student experience
-- Select an assignment and question
+### Student view
+Students can:
+- Select questions from either:
+  - **AI Practice** (AI-generated questions saved to the database)
+  - **Teacher Upload** (scanned images stored in Supabase Storage)
 - Answer using:
-  - a **canvas** for working (diagrams, calculations)
-  - optional typed response
-- Submit for marking and feedback
+  - **Typed response**
+  - **Handwritten response** via a drawing canvas
+- Click **Submit** and receive AI feedback (Markdown + LaTeX supported)
+- Use **Topic Journey** for scaffolded, step-by-step learning
 
-### Data + storage
-- **Postgres (Supabase)** for structured data (question bank, attempts)
-- **Supabase Storage** for scanned images (question + mark scheme)
-- App guards against common Streamlit issues (state mismatch in dropdowns, missing storage objects)
+While the AI is working, the UI is locked with a translucent overlay and a progress bar to prevent accidental changes.
+
+### Teacher view
+Teachers can:
+- Browse and preview the question bank (AI + teacher uploads)
+- Generate AI question drafts, edit them, and save them to the database
+- Upload scanned question and mark scheme images to storage and index them in the database
 
 ---
 
 ## Tech stack
 
-- **Streamlit** UI
-- **OpenAI API** for question generation and marking
-- **Supabase Postgres** for data persistence
-- **Supabase Storage** for images
-- **SQLAlchemy + psycopg** for database access
-- **Pillow** for image processing
-- **streamlit-drawable-canvas** for student working
+- **Frontend / App**: Streamlit
+- **AI**: OpenAI API (default model set in code)
+- **Database**: Supabase Postgres
+- **File storage**: Supabase Storage (for scanned images)
+- **Python libraries**: SQLAlchemy, psycopg, Pillow, pandas, streamlit-drawable-canvas
 
 ---
 
-## Project structure
+## Repo structure (typical)
 
-This repo is intentionally lightweight.
-
-- `app.py` (single-file Streamlit app)
-- `requirements.txt`
-- `README.md` (this file)
+- `app.py`  
+  Main Streamlit app (single file).
+- `requirements.txt`  
+  Python dependencies.
+- `README.md`  
+  This file.
 
 ---
-
-
-```bash
-pip install -r requirements.txt
