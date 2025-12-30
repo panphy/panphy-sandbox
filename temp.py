@@ -2574,7 +2574,7 @@ else:
                     sources = sorted([s for s in df_all["source"].dropna().unique().tolist() if str(s).strip()])
                     assignments = sorted([a for a in df_all["assignment_name"].dropna().unique().tolist() if str(a).strip()])
 
-                    f1, f2, f3 = st.columns([2, 2, 2])
+                    f1, f2, f3 = st.columns([2, 2, 3])
                     with f1:
                         src_sel = st.multiselect(
                             "Source",
@@ -2626,6 +2626,7 @@ else:
                             asg = str(r.get("assignment_name") or "").strip()
                             ql = str(r.get("question_label") or "").strip()
                             src = str(r.get("source") or "").strip()
+                            qtype = str(r.get("question_type") or "single").strip().lower()
                             try:
                                 mk = int(r.get("max_marks") or 0)
                             except Exception:
@@ -2634,7 +2635,8 @@ else:
                                 qid = int(r.get("id"))
                             except Exception:
                                 qid = -1
-                            return f"{asg} | {ql} ({mk} marks) [{src}] [id {qid}]"
+                            tag = "JOURNEY" if qtype == "journey" else "SINGLE"
+                            return f"{asg} | {ql} ({mk} marks) [{src}] [{tag}] [id {qid}]"
 
                         df_f["label"] = df_f.apply(_fmt_label, axis=1)
                         options = df_f["label"].tolist()
@@ -2642,12 +2644,13 @@ else:
                         if "bank_preview_pick" in st.session_state and st.session_state["bank_preview_pick"] not in options:
                             st.session_state["bank_preview_pick"] = options[0]
 
-                        pick = st.selectbox("Select a question to preview", options, key="bank_preview_pick")
+                        pick = st.selectbox("Select an entry to preview", options, key="bank_preview_pick")
                         pick_id = int(df_f.loc[df_f["label"] == pick, "id"].iloc[0])
 
                         row = load_question_by_id(pick_id) or {}
                         q_text = (row.get("question_text") or "").strip()
                         ms_text = (row.get("markscheme_text") or "").strip()
+                        q_type = str(row.get("question_type") or "single").strip().lower()
 
                         q_img = None
                         q_path = row.get("question_image_path")
@@ -2670,83 +2673,81 @@ else:
                             st.caption(f"ID: {row.get('id', '')}")
 
                         pv1, pv2 = st.columns(2)
-if str(row.get("question_type", "single") or "single").strip().lower() == "journey":
-    # Journey preview (teacher)
-    rawj = row.get("journey_json")
-    try:
-        if isinstance(rawj, str):
-            journey = json.loads(rawj) if rawj.strip() else {}
-        elif isinstance(rawj, dict):
-            journey = rawj
-        else:
-            journey = {}
-    except Exception:
-        journey = {}
 
-    plan_md = (journey.get("plan_markdown") or q_text or "").strip()
-    steps = journey.get("steps", [])
-    if not isinstance(steps, list):
-        steps = []
+                        if q_type == "journey":
+                            # Journey preview
+                            rawj = row.get("journey_json")
+                            try:
+                                if isinstance(rawj, str):
+                                    journey = json.loads(rawj) if rawj.strip() else {}
+                                elif isinstance(rawj, dict):
+                                    journey = rawj
+                                else:
+                                    journey = {}
+                            except Exception:
+                                journey = {}
 
-    with pv1:
-        st.markdown("**Topic Journey plan**")
-        with st.container(border=True):
-            if plan_md:
-                st.markdown(normalize_markdown_math(plan_md))
-            else:
-                st.caption("No plan text.")
-        st.caption(f"Steps: {len(steps)}")
+                            plan_md = (journey.get("plan_markdown") or q_text or "").strip()
+                            steps = journey.get("steps", [])
+                            if not isinstance(steps, list):
+                                steps = []
 
-        for i, stp in enumerate(steps[:50]):
-            if not isinstance(stp, dict):
-                continue
-            with st.expander(f"Step {i+1}: {str(stp.get('objective','') or '')[:80]}", expanded=(i == 0)):
-                st.markdown(normalize_markdown_math(str(stp.get("question_text", "") or "")))
+                            with pv1:
+                                st.markdown("**Topic Journey plan**")
+                                with st.container(border=True):
+                                    if plan_md:
+                                        st.markdown(normalize_markdown_math(plan_md))
+                                    else:
+                                        st.caption("No plan text.")
+                                st.caption(f"Steps: {len(steps)}")
+                                for i, stp in enumerate(steps[:50]):
+                                    if not isinstance(stp, dict):
+                                        continue
+                                    title = str(stp.get("objective") or "").strip() or "Step"
+                                    with st.expander(f"Step {i+1}: {title[:80]}", expanded=(i == 0)):
+                                        st.markdown(normalize_markdown_math(str(stp.get("question_text", "") or "")))
 
-    with pv2:
-        st.markdown("**Mark schemes (teacher only)**")
-        for i, stp in enumerate(steps[:50]):
-            if not isinstance(stp, dict):
-                continue
-            with st.expander(f"Step {i+1} mark scheme", expanded=(i == 0)):
-                st.markdown(normalize_markdown_math(str(stp.get("markscheme_text", "") or "")))
-                miscon = stp.get("misconceptions", [])
-                if isinstance(miscon, list) and miscon:
-                    st.markdown("**Common misconceptions:**")
-                    for m in miscon[:6]:
-                        st.markdown(normalize_markdown_math(f"- {m}"))
-else:
-    with pv1:
-        st.markdown("**Question**")
-        with st.container(border=True):
-            if q_img is not None:
-                st.image(q_img, use_container_width=True)
-            if q_text:
-                st.markdown(normalize_markdown_math(q_text))
-            if (q_img is None) and (not q_text):
-                st.caption("No question text/image (image-only teacher uploads are supported).")
+                            with pv2:
+                                st.markdown("**Mark schemes (teacher only)**")
+                                for i, stp in enumerate(steps[:50]):
+                                    if not isinstance(stp, dict):
+                                        continue
+                                    with st.expander(f"Step {i+1} mark scheme", expanded=(i == 0)):
+                                        st.markdown(normalize_markdown_math(str(stp.get("markscheme_text", "") or "")))
+                                        miscon = stp.get("misconceptions", [])
+                                        if isinstance(miscon, list) and miscon:
+                                            st.markdown("**Common misconceptions:**")
+                                            for m in miscon[:6]:
+                                                st.markdown(normalize_markdown_math(f"- {m}"))
+                        else:
+                            with pv1:
+                                st.markdown("**Question**")
+                                with st.container(border=True):
+                                    if q_img is not None:
+                                        st.image(q_img, use_container_width=True)
+                                    if q_text:
+                                        st.markdown(normalize_markdown_math(q_text))
+                                    if (q_img is None) and (not q_text):
+                                        st.caption("No question text/image (image-only teacher uploads are supported).")
 
-    with pv2:
-        st.markdown("**Mark scheme (teacher only)**")
-        with st.container(border=True):
-            if ms_img is not None:
-                st.image(ms_img, use_container_width=True)
-            if ms_text:
-                st.markdown(normalize_markdown_math(ms_text))
-            if (ms_img is None) and (not ms_text):
-                st.caption("No mark scheme text/image (image-only teacher uploads are supported).")
+                            with pv2:
+                                st.markdown("**Mark scheme (teacher only)**")
+                                with st.container(border=True):
+                                    if ms_img is not None:
+                                        st.image(ms_img, use_container_width=True)
+                                    if ms_text:
+                                        st.markdown(normalize_markdown_math(ms_text))
+                                    if (ms_img is None) and (not ms_text):
+                                        st.caption("No mark scheme text/image (image-only teacher uploads are supported).")
 
-                st.divider()
-                st.write("### Recent question bank entries")
-                df_bank = load_question_bank_df(limit=50, include_inactive=False)
-                if not df_bank.empty:
-                    st.dataframe(df_bank[["created_at", "source", "assignment_name", "question_label", "max_marks", "id"]], use_container_width=True)
-                else:
-                    st.info("No recent entries.")
-
-                        # -------------------------
-            # AI generator
-            # -------------------------
+                        st.divider()
+                        st.write("### Recent question bank entries")
+                        df_bank = load_question_bank_df(limit=50, include_inactive=False)
+                        if not df_bank.empty:
+                            show_cols = [c for c in ["created_at", "source", "assignment_name", "question_label", "question_type", "max_marks", "id"] if c in df_bank.columns]
+                            st.dataframe(df_bank[show_cols], use_container_width=True)
+                        else:
+                            st.info("No recent entries.")
             with tab_ai:
                 st.write("## 🤖 AI generator (teacher vetting required)")
                 gen_mode = st.radio("Generator", ["Single question", "Topic Journey"], horizontal=True, key="gen_mode")
