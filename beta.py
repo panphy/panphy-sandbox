@@ -342,6 +342,10 @@ alter table public.question_bank_v1
 alter table public.question_bank_v1
   add column if not exists track_ok text not null default 'both';
 
+drop index if exists public.uq_question_bank_source_assignment_label;
+create unique index if not exists uq_question_bank_subject_source_assignment_label
+  on public.question_bank_v1 (subject_site, source, assignment_name, question_label);
+
 """
 
 # =========================
@@ -1470,6 +1474,8 @@ def insert_question_bank_row(
     markscheme_image_path: Optional[str] = None,
     question_type: str = "single",
     journey_json: Optional[dict] = None,
+    subject_site: Optional[str] = None,
+    track_ok: str = "both",
 ) -> bool:
     eng = get_db_engine()
     if eng is None:
@@ -1497,7 +1503,7 @@ def insert_question_bank_row(
        :question_text, :question_image_path,
        :markscheme_text, :markscheme_image_path,
        true, now())
-    on conflict (source, assignment_name, question_label) do update set
+    on conflict (subject_site, source, assignment_name, question_label) do update set
        created_by = excluded.created_by,
        subject_site = excluded.subject_site,
        track_ok = excluded.track_ok,
@@ -1991,7 +1997,7 @@ with st.sidebar:
             st.badge("SEPARATE", color="primary")
         else:
             st.markdown(":blue-badge[SEPARATE]")
-    st.caption("This badge show whether Combined or Separate Physics is selected.")
+    st.caption("Separate badge uses the app primary color. To make it turquoise, set theme.primaryColor in .streamlit/config.toml (e.g. #20C997).")
 
 header_left, header_mid, header_right = st.columns([3, 2, 1])
 
