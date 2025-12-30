@@ -14,7 +14,6 @@ import secrets as pysecrets
 import logging
 from logging.handlers import RotatingFileHandler
 import os
-from pathlib import Path
 import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -135,349 +134,6 @@ QUESTION_TYPES = ["Calculation", "Explanation", "Practical/Methods", "Graph/Anal
 DIFFICULTIES = ["Easy", "Medium", "Hard"]
 
 # ============================================================
-# SPEC PACK (AQA) LOADER + HELPERS
-#   Put your extracted spec JSON(s) in ./specs/
-#   Example: specs/aqa_gcse_physics.json
-# ============================================================
-SPECS_DIRNAME = "specs"
-DEFAULT_SPEC_FILENAME = "aqa_gcse_physics.json"
-
-def _specs_search_paths() -> List[Path]:
-    # Try both CWD and the directory containing this app.py
-    paths = []
-    try:
-        paths.append(Path.cwd() / SPECS_DIRNAME)
-    except Exception:
-        pass
-    try:
-        paths.append(Path(__file__).resolve().parent / SPECS_DIRNAME)
-    except Exception:
-        pass
-    # De-duplicate while preserving order
-    seen = set()
-    out = []
-    for p in paths:
-        ps = str(p.resolve()) if p.exists() else str(p)
-        if ps not in seen:
-            seen.add(ps)
-            out.append(p)
-    return out
-
-@st.cache_data(ttl=300)
-def list_spec_json_files() -> List[str]:
-    files: List[str] = []
-    for base in _specs_search_paths():
-        if base.exists() and base.is_dir():
-            for fp in sorted(base.glob("*.json")):
-                files.append(str(fp))
-    # If none found, still return the default (relative) so the UI can guide the user
-    if not files:
-        files = [str(Path(SPECS_DIRNAME) / DEFAULT_SPEC_FILENAME)]
-    return files
-
-@st.cache_data(ttl=300)
-def load_spec_pack(spec_path: str) -> Dict[str, Any]:
-    """
-    Loads a 'Spec Pack' JSON (from your extractor).
-    Expected top-level keys (minimum useful): allowed_topics, topic_tree, tier, subject_key.
-    """
-    p = Path(spec_path)
-    # If a relative path, try resolving against search paths
-    if not p.is_absolute():
-        for base in _specs_search_paths():
-            cand = base / p.name
-            if cand.exists():
-                p = cand
-                break
-    if not p.exists():
-        raise FileNotFoundError(f"Spec pack not found at: {spec_path}")
-    return json.loads(p.read_text(encoding="utf-8"))
-
-def _looks_like_spec_code(code: str) -> bool:
-    """Return True if *code* looks like an AQA-style numeric spec code (e.g. 4.1.2.3)."""
-    s = str(code or "").strip()
-    return bool(re.fullmatch(r"\d+(?:\.\d+)*", s))
-
-def normalized_content_map(spec_pack: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, List[str]]]:
-    """Return a normalized {code: {content: [str, ...]}} mapping from various extractor schemas."""
-    if not isinstance(spec_pack, dict):
-        return {}
-
-    # Common variants across different extractors
-    candidate_keys = [
-        "content_map",
-        "topic_code_to_content",
-        "code_to_content",
-        "content_by_code",
-        "topic_code_to_lines",
-        "topic_code_to_bullets",
-    ]
-
-    raw = None
-    for k in candidate_keys:
-        v = spec_pack.get(k)
-        if isinstance(v, dict) and v:
-            raw = v
-            break
-
-    if not isinstance(raw, dict):
-        return {}
-
-    out: Dict[str, Dict[str, List[str]]] = {}
-    for code, entry in raw.items():
-        code_s = str(code).strip()
-        if not _looks_like_spec_code(code_s):
-            continue
-
-        content = None
-        if isinstance(entry, dict):
-            content = (
-                entry.get("content")
-                or entry.get("lines")
-                or entry.get("bullets")
-                or entry.get("text")
-                or entry.get("content_lines")
-            )
-        else:
-            content = entry
-
-        lines: List[str] = []
-        if content is None:
-            lines = []
-        elif isinstance(content, str):
-            lines = [ln.strip().lstrip("-•\t ") for ln in content.splitlines() if ln.strip()]
-        elif isinstance(content, list):
-            for x in content:
-                sx = str(x).strip()
-                if sx:
-                    lines.append(sx)
-        else:
-            sx = str(content).strip()
-            if sx:
-                lines = [sx]
-
-        out[code_s] = {"content": lines}
-
-    return out
-
-def build_spec_indexes(spec_pack: Optional[Dict[str, Any]]) -> Tuple[Dict[str, str], Dict[str, bool]]:
-    """Build lookup tables from a spec pack.
-
-    This app supports multiple extractor JSON schemas. We try (in order):
-
-    1) allowed_topics: List[Dict{code,title,ht_only}] OR Dict[code -> title|{title,ht_only}]
-    2) topic_code_to_title / code_to_title: Dict[code -> title|{title,...}]
-    3) topic_tree: nested tree of nodes containing code/title + children
-    """
-    code_to_title: Dict[str, str] = {}
-    code_to_ht: Dict[str, bool] = {}
-
-    if not isinstance(spec_pack, dict):
-        return code_to_title, code_to_ht
-
-    # Helper to add a code safely
-    def _add(code: str, title: str = "", ht_only: bool = False):
-        c = str(code or "").strip()
-        if not _looks_like_spec_code(c):
-            return
-        t = str(title or "").strip()
-        if c not in code_to_title:
-            code_to_title[c] = t
-        elif t and not code_to_title[c]:
-            code_to_title[c] = t
-        if ht_only:
-            code_to_ht[c] = True
-        else:
-            code_to_ht.setdefault(c, False)
-
-    # (A) allowed_topics (preferred if present and well-formed)
-    topics = spec_pack.get("allowed_topics")
-    iterable: List[Any] = []
-
-    if isinstance(topics, dict):
-        for k, v in topics.items():
-            if isinstance(v, dict):
-                d = {"code": k, **v}
-            else:
-                d = {"code": k, "title": str(v)}
-            iterable.append(d)
-    elif isinstance(topics, list):
-        iterable = topics
-
-    if iterable:
-        code_re = re.compile(r"^(\d+(?:\.\d+)*)")
-        for t in iterable:
-            if isinstance(t, dict):
-                code = str(t.get("code", "")).strip()
-                title = str(t.get("title", "")).strip()
-                ht = bool(t.get("ht_only", False) or t.get("higher_only", False))
-                _add(code, title, ht)
-            elif isinstance(t, str):
-                s = t.strip()
-                m = code_re.match(s)
-                if not m:
-                    continue
-                code = m.group(1)
-                title = s[len(code):].lstrip(" :-–—\t")
-                _add(code, title, False)
-
-    # (B) direct mapping variants
-    if not code_to_title:
-        for key in ("topic_code_to_title", "code_to_title", "topic_titles", "topic_code_to_heading"):
-            m = spec_pack.get(key)
-            if not isinstance(m, dict) or not m:
-                continue
-            for k, v in m.items():
-                if isinstance(v, dict):
-                    title = v.get("title") or v.get("heading") or v.get("name") or ""
-                    ht = bool(v.get("ht_only", False) or v.get("higher_only", False))
-                else:
-                    title = str(v)
-                    ht = False
-                _add(str(k), str(title), ht)
-            if code_to_title:
-                break
-
-    # (C) topic_tree traversal
-    if not code_to_title:
-        tree = spec_pack.get("topic_tree") or spec_pack.get("tree") or spec_pack.get("topics_tree")
-        def _walk(node: Any):
-            if isinstance(node, dict):
-                # Node-form
-                if "code" in node:
-                    title = node.get("title") or node.get("heading") or node.get("name") or ""
-                    ht = bool(node.get("ht_only", False) or node.get("higher_only", False))
-                    _add(str(node.get("code")), str(title), ht)
-                # Mapping-form (code -> child)
-                for k, v in node.items():
-                    if _looks_like_spec_code(str(k)):
-                        if isinstance(v, dict):
-                            title = v.get("title") or v.get("heading") or v.get("name") or ""
-                            ht = bool(v.get("ht_only", False) or v.get("higher_only", False))
-                            _add(str(k), str(title), ht)
-                            # Recurse children
-                            for ck in ("children", "subtopics", "sections", "subsections", "items", "nodes"):
-                                if ck in v:
-                                    _walk(v.get(ck))
-                        else:
-                            _add(str(k), str(v), False)
-                # Children arrays
-                for ck in ("children", "subtopics", "sections", "subsections", "items", "nodes"):
-                    if ck in node:
-                        _walk(node.get(ck))
-            elif isinstance(node, list):
-                for it in node:
-                    _walk(it)
-
-        _walk(tree)
-
-    # Global HT-only code list (optional)
-    ht_codes = spec_pack.get("ht_only_codes") or spec_pack.get("higher_only_codes") or []
-    if isinstance(ht_codes, list):
-        for c in ht_codes:
-            cs = str(c).strip()
-            if _looks_like_spec_code(cs):
-                code_to_ht[cs] = True
-                code_to_title.setdefault(cs, code_to_title.get(cs, ""))
-
-    return code_to_title, code_to_ht
-def spec_path_for_code(code: str, code_to_title: Dict[str, str]) -> List[Tuple[str, str]]:
-    """
-    Build a breadcrumb path like [('4.5','Forces'),('4.5.2','Forces and their effects'),...]
-    """
-    c = (code or "").strip()
-    if not c:
-        return []
-    parts = c.split(".")
-    out = []
-    # progressively build codes: 4, 4.5, 4.5.2, ...
-    # (Most AQA codes are 4.x..., keep it general anyway.)
-    for i in range(1, len(parts) + 1):
-        pc = ".".join(parts[:i])
-        if pc in code_to_title:
-            out.append((pc, code_to_title[pc]))
-    return out
-
-def spec_excerpt_for_code(spec_pack: Dict[str, Any], target_code: str, max_lines: int = 24) -> str:
-    """
-    Returns a compact text excerpt for the target code.
-
-    Many spec extractors store most wording at higher-level headings,
-    so we fall back to the nearest ancestor that has non-empty content.
-    """
-    content_map = normalized_content_map(spec_pack)
-    code_to_title, _ = build_spec_indexes(spec_pack)
-
-    def content_lines_for(code: str) -> List[str]:
-        entry = content_map.get(code) or {}
-        lines = entry.get("content") or []
-        out: List[str] = []
-        for x in lines:
-            sx = str(x).strip()
-            if sx:
-                out.append(sx)
-        return out
-
-    # Walk up the hierarchy until we find content
-    c = (target_code or "").strip()
-    candidates: List[str] = []
-    if c:
-        parts = c.split(".")
-        for i in range(len(parts), 0, -1):
-            candidates.append(".".join(parts[:i]))
-
-    for cc in candidates:
-        lines2 = content_lines_for(cc)
-        if lines2:
-            title = code_to_title.get(cc, "")
-            head = f"{cc} {title}".strip()
-            snippet = "\n".join(f"- {ln}" for ln in lines2[:max_lines])
-            return f"{head}\n{snippet}".strip()
-
-    # If no content found, return a breadcrumb list of sub-sections for anchoring
-    path = spec_path_for_code(c, code_to_title)
-    if path:
-        crumbs = " → ".join([f"{pc} {pt}".strip() for pc, pt in path])
-        return f"{crumbs}\n- (No extracted wording for this sub-section in the current JSON; using titles as anchor.)"
-    return "- (No spec excerpt available.)"
-def format_spec_option(code: str, title: str, ht_only: bool) -> str:
-    s = f"{code} {title}".strip()
-    if ht_only:
-        s += " [HT only]"
-    return s
-
-def build_spec_select_options(spec_pack: Dict[str, Any], include_top_level: bool = True) -> List[Tuple[str, str]]:
-    """
-    Returns list of (code, display_string) sorted by code.
-    """
-    code_to_title, code_to_ht = build_spec_indexes(spec_pack)
-    codes = sorted(code_to_title.keys(), key=lambda x: [int(p) if p.isdigit() else p for p in x.split(".")])
-    opts = []
-    for c in codes:
-        if not include_top_level and len((c or "").split(".")) <= 2:
-            continue
-        opts.append((c, format_spec_option(c, code_to_title.get(c, ""), code_to_ht.get(c, False))))
-    return opts
-
-def extract_spec_tags(code: str, code_to_title: Dict[str, str]) -> List[str]:
-    """
-    Simple tags we can store in the existing 'tags' jsonb column (list-of-strings).
-    Keeps DB compatibility.
-    """
-    tags = []
-    c = (code or "").strip()
-    if not c:
-        return tags
-    tags.append(f"spec:{c}")
-    # Also tag the top topic (e.g. 4.5)
-    parts = c.split(".")
-    if len(parts) >= 2:
-        top = ".".join(parts[:2])
-        if top in code_to_title:
-            tags.append(f"spec_top:{top}")
-    return tags
-
-# ============================================================
 # DATABASE DDLs
 #   IMPORTANT: avoid $$ PL/pgSQL blocks inside app DDL to prevent split/execution issues.
 # ============================================================
@@ -527,6 +183,14 @@ create index if not exists idx_question_bank_source
 create index if not exists idx_question_bank_active
   on public.question_bank_v1 (is_active);
 """.strip()
+
+
+QUESTION_BANK_ALTER_DDL = """
+alter table public.question_bank_v1
+  add column if not exists question_type text default 'single';
+alter table public.question_bank_v1
+  add column if not exists journey_json jsonb;
+"""
 
 # =========================
 # --- OPENAI CLIENT (CACHED) ---
@@ -593,6 +257,17 @@ _ss_init("cached_ms_path", None)
 # AI generator draft cache (teacher-only)
 _ss_init("ai_draft", None)
 
+
+# Topic Journey state (student)
+_ss_init("journey_step_index", 0)          # 0-based
+_ss_init("journey_step_reports", [])       # list of per-step reports
+_ss_init("journey_checkpoint_notes", {})   # step_index -> markdown
+_ss_init("journey_active_id", None)        # question_bank_v1.id of current journey
+_ss_init("journey_json_cache", None)       # parsed journey JSON for current selection
+
+# Topic Journey draft (teacher)
+_ss_init("journey_draft", None)
+
 # ============================================================
 #  ROBUST DATABASE LAYER
 # ============================================================
@@ -651,6 +326,8 @@ def db_ready() -> bool:
 
 def _split_sql_statements(sql_blob: str) -> List[str]:
     """
+
+
     Split SQL blob into statements at semicolons, but ignore semicolons in:
     - single-quoted strings
     - double-quoted identifiers
@@ -718,6 +395,8 @@ def ensure_attempts_table():
       created_at timestamptz not null default now(),
       student_id text not null,
       question_key text not null,
+      question_bank_id bigint,
+      step_index int,
       mode text not null,
       marks_awarded int not null,
       max_marks int not null,
@@ -728,6 +407,11 @@ def ensure_attempts_table():
     """
 
     ddl_alter = """
+    alter table public.physics_attempts_v1
+      add column if not exists question_bank_id bigint;
+    alter table public.physics_attempts_v1
+      add column if not exists step_index int;
+
     alter table public.physics_attempts_v1
       add column if not exists readback_type text;
     alter table public.physics_attempts_v1
@@ -771,6 +455,7 @@ def ensure_question_bank_table():
     try:
         with eng.begin() as conn:
             _exec_sql_many(conn, QUESTION_BANK_DDL)
+            _exec_sql_many(conn, QUESTION_BANK_ALTER_DDL)
         st.session_state["bank_table_ready"] = True
         st.session_state["db_last_error"] = ""
         LOGGER.info("Question bank table ready", extra={"ctx": {"component": "db", "table": "question_bank_v1"}})
@@ -1217,13 +902,82 @@ def clamp_int(value, lo, hi, default=0):
         v = default
     return max(lo, min(hi, v))
 
+
 # ============================================================
-# MARKDOWN RENDER HELPERS
+# MARKDOWN + LaTeX RENDER HELPERS (robust)
 # ============================================================
+_MD_TOKEN_CODEBLOCK = re.compile(r"```.*?```", re.DOTALL)
+_MD_TOKEN_INLINECODE = re.compile(r"`[^`\n]+`")
+_MD_TOKEN_MATHBLOCK = re.compile(r"\$\$.*?\$\$", re.DOTALL)
+# Inline math: a single $...$ on one line (avoid $$...$$ which is handled above)
+_MD_TOKEN_MATHINLINE = re.compile(r"(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)")
+
+def _protect_segments(pattern: re.Pattern, text_in: str, store: Dict[str, str], prefix: str) -> str:
+    def _repl(m):
+        key = f"@@{prefix}{len(store)}@@"
+        store[key] = m.group(0)
+        return key
+    return pattern.sub(_repl, text_in)
+
+def _restore_segments(text_in: str, store: Dict[str, str]) -> str:
+    out = text_in
+    # restore in reverse insertion order to reduce accidental nested replacement
+    for k in sorted(store.keys(), key=lambda x: -len(x)):
+        out = out.replace(k, store[k])
+    return out
+
+def normalize_markdown_math(md_text: str) -> str:
+    """
+    Heuristic normalizer for Streamlit Markdown + MathJax rendering.
+
+    Goals:
+    - Preserve Markdown structure and existing math ($...$, $$...$$)
+    - Preserve fenced code blocks and inline code
+    - Convert \(...\) -> $...$ and \[...\] -> $$...$$
+    - Wrap simple 'standalone' math tokens like 3^2, v^2, a_t, a_{t} in $...$
+    """
+    s = (md_text or "")
+    if not s.strip():
+        return ""
+
+    # Normalize newlines
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
+
+    protected: Dict[str, str] = {}
+    s = _protect_segments(_MD_TOKEN_CODEBLOCK, s, protected, "CB")
+    s = _protect_segments(_MD_TOKEN_MATHBLOCK, s, protected, "MB")
+    s = _protect_segments(_MD_TOKEN_MATHINLINE, s, protected, "MI")
+    s = _protect_segments(_MD_TOKEN_INLINECODE, s, protected, "IC")
+
+    # Convert common LaTeX delimiters to MathJax-friendly ones
+    s = re.sub(r"\\\((.*?)\\\)", r"$\1$", s, flags=re.DOTALL)
+    s = re.sub(r"\\\[(.*?)\\\]", r"$$\1$$", s, flags=re.DOTALL)
+
+    # Wrap simple math tokens not already protected
+    # Examples: 3^2, v^2, a_t, a_{t}, m/s^2 (will wrap s^2)
+    token_pat = re.compile(
+        r"(?<!\$)(?<!\\)(?<![A-Za-z0-9])"
+        r"([A-Za-z0-9]+(?:/[A-Za-z0-9]+)*"
+        r"(?:\s*(?:\^\s*[-+]?\d+|_\{[^}]+\}|_[A-Za-z0-9]+)))"
+        r"(?![A-Za-z0-9])"
+    )
+
+    def _wrap(m: re.Match) -> str:
+        expr = m.group(1)
+        # tighten spacing around ^ and _
+        expr = re.sub(r"\s*(\^|_)\s*", r"\1", expr)
+        expr = expr.strip()
+        return f"${expr}$"
+
+    s = token_pat.sub(_wrap, s)
+
+    s = _restore_segments(s, protected)
+    return s
+
 def render_md_box(title: str, md_text: str, caption: str = "", empty_text: str = ""):
     st.markdown(f"**{title}**")
     with st.container(border=True):
-        txt = (md_text or "").strip()
+        txt = normalize_markdown_math((md_text or "").strip())
         if txt:
             st.markdown(txt)
         else:
@@ -1257,7 +1011,7 @@ def _run_ai_with_progress(task_fn, ctx: dict, typical_range: str, est_seconds: f
 # ============================================================
 # DB OPERATIONS (attempts + question bank)
 # ============================================================
-def insert_attempt(student_id: str, question_key: str, report: dict, mode: str):
+def insert_attempt(student_id: str, question_key: str, report: dict, mode: str, question_bank_id: Optional[int] = None, step_index: Optional[int] = None):
     eng = get_db_engine()
     if eng is None:
         return
@@ -1277,10 +1031,10 @@ def insert_attempt(student_id: str, question_key: str, report: dict, mode: str):
 
     query = """
         insert into public.physics_attempts_v1
-        (student_id, question_key, mode, marks_awarded, max_marks, summary, feedback_points, next_steps,
+        (student_id, question_key, question_bank_id, step_index, mode, marks_awarded, max_marks, summary, feedback_points, next_steps,
          readback_type, readback_markdown, readback_warnings)
         values
-        (:student_id, :question_key, :mode, :marks_awarded, :max_marks, :summary,
+        (:student_id, :question_key, :question_bank_id, :step_index, :mode, :marks_awarded, :max_marks, :summary,
          CAST(:feedback_points AS jsonb), CAST(:next_steps AS jsonb),
          :readback_type, :readback_markdown, CAST(:readback_warnings AS jsonb))
     """
@@ -1289,6 +1043,8 @@ def insert_attempt(student_id: str, question_key: str, report: dict, mode: str):
             conn.execute(text(query), {
                 "student_id": sid,
                 "question_key": question_key,
+                "question_bank_id": int(question_bank_id) if question_bank_id is not None else None,
+                "step_index": int(step_index) if step_index is not None else None,
                 "mode": mode,
                 "marks_awarded": m_awarded,
                 "max_marks": m_max,
@@ -1353,7 +1109,7 @@ def load_question_bank_df_cached(_fp: str, limit: int = 5000, include_inactive: 
                 select
                   id, created_at, updated_at,
                   source, assignment_name, question_label,
-                  max_marks, tags, question_text,
+                  max_marks, question_type, tags, question_text,
                   is_active
                 from public.question_bank_v1
                 {where}
@@ -1409,20 +1165,26 @@ def insert_question_bank_row(
     markscheme_text: str = "",
     question_image_path: Optional[str] = None,
     markscheme_image_path: Optional[str] = None,
+    question_type: str = "single",
+    journey_json: Optional[dict] = None,
 ) -> bool:
     eng = get_db_engine()
     if eng is None:
         return False
     ensure_question_bank_table()
 
+    qtype = (question_type or "single").strip().lower()
+    if qtype not in ("single", "journey"):
+        qtype = "single"
+
     query = """
     insert into public.question_bank_v1
-      (source, created_by, assignment_name, question_label, max_marks, tags,
+      (source, created_by, assignment_name, question_label, max_marks, question_type, journey_json, tags,
        question_text, question_image_path,
        markscheme_text, markscheme_image_path,
        is_active, updated_at)
     values
-      (:source, :created_by, :assignment_name, :question_label, :max_marks,
+      (:source, :created_by, :assignment_name, :question_label, :max_marks, :question_type, CAST(:journey_json AS jsonb),
        CAST(:tags AS jsonb),
        :question_text, :question_image_path,
        :markscheme_text, :markscheme_image_path,
@@ -1430,6 +1192,8 @@ def insert_question_bank_row(
     on conflict (source, assignment_name, question_label) do update set
        created_by = excluded.created_by,
        max_marks = excluded.max_marks,
+       question_type = excluded.question_type,
+       journey_json = excluded.journey_json,
        tags = excluded.tags,
        question_text = excluded.question_text,
        question_image_path = excluded.question_image_path,
@@ -1446,6 +1210,8 @@ def insert_question_bank_row(
                 "assignment_name": assignment_name.strip(),
                 "question_label": question_label.strip(),
                 "max_marks": int(max_marks),
+                "question_type": qtype,
+                "journey_json": json.dumps(journey_json or {}) if qtype == "journey" else None,
                 "tags": json.dumps(tags or []),
                 "question_text": (question_text or "").strip()[:12000] or None,
                 "question_image_path": (question_image_path or "").strip() or None,
@@ -1502,11 +1268,21 @@ Max Marks: {int(max_marks)}
 
 
 def _finalize_report(data: dict, max_marks: int) -> dict:
-    readback_md = str(data.get("readback_markdown", "") or "").strip()
+    def _norm(s: str) -> str:
+        return normalize_markdown_math(str(s or "").strip())
+
+    readback_md = _norm(data.get("readback_markdown", ""))
     readback_type = str(data.get("readback_type", "") or "").strip()
     readback_warn = data.get("readback_warnings", [])
     if not isinstance(readback_warn, list):
         readback_warn = []
+
+    feedback_points = data.get("feedback_points", [])
+    if not isinstance(feedback_points, list):
+        feedback_points = []
+    next_steps = data.get("next_steps", [])
+    if not isinstance(next_steps, list):
+        next_steps = []
 
     return {
         "readback_type": readback_type,
@@ -1514,9 +1290,9 @@ def _finalize_report(data: dict, max_marks: int) -> dict:
         "readback_warnings": [str(x) for x in readback_warn][:6],
         "marks_awarded": clamp_int(data.get("marks_awarded", 0), 0, int(max_marks)),
         "max_marks": int(max_marks),
-        "summary": str(data.get("summary", "")).strip(),
-        "feedback_points": [str(x) for x in data.get("feedback_points", [])][:6],
-        "next_steps": [str(x) for x in data.get("next_steps", [])][:6]
+        "summary": _norm(data.get("summary", "")),
+        "feedback_points": [_norm(x) for x in feedback_points][:6],
+        "next_steps": [_norm(x) for x in next_steps][:6]
     }
 
 
@@ -1622,8 +1398,6 @@ def generate_practice_question_with_ai(
     qtype: str,
     marks: int,
     extra_instructions: str = "",
-    spec_pack: Optional[Dict[str, Any]] = None,
-    target_spec_code: str = "",
 ) -> Dict[str, Any]:
     def _extract_total_from_marksheme(ms: str) -> Optional[int]:
         m = re.search(r"\btotal\b\s*[:=]\s*(\d+)\b", ms or "", flags=re.IGNORECASE)
@@ -1702,12 +1476,6 @@ Hard rules:
      one method mark (setup/substitution/rearrangement) and one accuracy mark (answer with unit).
 7) Return ONLY valid JSON, nothing else.
 
-Spec anchoring (CRITICAL):
-- You MUST keep the question within the provided target AQA spec section code.
-- Use the spec anchor excerpt as the source-of-truth for what is in-scope.
-- If the excerpt is sparse, stay within the section title and typical GCSE interpretation.
-- If you are unsure whether something is in-spec, avoid it.
-
 {GCSE_ONLY_GUARDRAILS}
 
 {MARKDOWN_LATEX_RULES}
@@ -1732,10 +1500,6 @@ Topic: {topic_text.strip()}
 Difficulty: {difficulty}
 Question type: {qtype}
 max_marks: {int(marks)}
-
-Target AQA spec section (code): {target_spec_code.strip() if target_spec_code else "(not provided)"}
-Spec anchor excerpt (official wording/titles):
-{spec_excerpt_for_code(spec_pack, target_spec_code) if (spec_pack and target_spec_code) else "(none)"}
 
 Additional teacher instructions (optional):
 {extra_instructions.strip() if extra_instructions else "(none)"}
@@ -1801,151 +1565,237 @@ You MUST:
     if not isinstance(out["warnings"], list):
         out["warnings"] = []
     out["warnings"] = [str(w) for w in out["warnings"]][:10]
+    
     return out
+
+# ============================================================
+# TOPIC JOURNEY GENERATOR (teacher-only)
+# ============================================================
+DURATION_TO_STEPS = {10: 5, 20: 8, 30: 12}
+JOURNEY_CHECKPOINT_EVERY = 3
+
+def _load_local_aqa_8463_spec_snippet(max_chars: int = 6000) -> str:
+    """
+    Optional: if you have a local extracted spec JSON/text in your repo, place it under ./specs/.
+    We only load a short snippet for guardrails (avoid large prompts).
+    """
+    candidates = [
+        "specs/aqa_8463_physics.json",
+        "specs/aqa_8463_physics_higher.json",
+        "specs/8463.json",
+        "specs/8463_physics.json",
+        "specs/aqa-8463-physics.json",
+    ]
+    for p in candidates:
+        try:
+            if os.path.exists(p):
+                raw = open(p, "r", encoding="utf-8").read()
+                raw = raw.strip()
+                if not raw:
+                    continue
+                return raw[:max_chars]
+        except Exception:
+            continue
+    return ""
+
+def generate_topic_journey_with_ai(
+    topic_plain_english: str,
+    duration_minutes: int,
+    emphasis: Dict[str, int],
+) -> Dict[str, Any]:
+    steps_n = DURATION_TO_STEPS.get(int(duration_minutes), 8)
+    topic_plain_english = (topic_plain_english or "").strip()
+
+    spec_snip = _load_local_aqa_8463_spec_snippet()
+
+    def _validate(d: Dict[str, Any]) -> Tuple[bool, List[str]]:
+        reasons: List[str] = []
+        if not isinstance(d, dict):
+            return False, ["Output is not a JSON object."]
+        if str(d.get("topic", "")).strip() == "":
+            reasons.append("Missing topic.")
+        steps = d.get("steps", [])
+        if not isinstance(steps, list) or len(steps) != steps_n:
+            reasons.append(f"steps must be a list of length {steps_n}.")
+            return False, reasons
+
+        for i, stp in enumerate(steps):
+            if not isinstance(stp, dict):
+                reasons.append(f"Step {i+1} is not an object.")
+                continue
+            if not str(stp.get("objective", "")).strip():
+                reasons.append(f"Step {i+1}: missing objective.")
+            if not str(stp.get("question_text", "")).strip():
+                reasons.append(f"Step {i+1}: missing question_text.")
+            if not str(stp.get("markscheme_text", "")).strip():
+                reasons.append(f"Step {i+1}: missing markscheme_text.")
+            try:
+                mm = int(stp.get("max_marks", 0))
+            except Exception:
+                mm = 0
+            if mm <= 0 or mm > 12:
+                reasons.append(f"Step {i+1}: max_marks must be 1-12.")
+            ms = str(stp.get("markscheme_text", "") or "")
+            if f"TOTAL = {mm}" not in ms:
+                reasons.append(f"Step {i+1}: markscheme_text must end with 'TOTAL = {mm}'.")
+        return (len(reasons) == 0), reasons
+
+    def _call_model(repair: bool, reasons: Optional[List[str]] = None) -> Dict[str, Any]:
+        system = f"""
+You are an expert AQA GCSE Physics (8463) Higher question writer and examiner.
+
+Hard rules:
+1) Create an ORIGINAL Topic Journey (no copyrighted exam questions).
+2) Tier: Higher only. Stay strictly GCSE level.
+3) Each step must build towards a final hardest exam-style question.
+4) Return ONLY valid JSON, nothing else.
+
+{GCSE_ONLY_GUARDRAILS}
+
+{MARKDOWN_LATEX_RULES}
+
+Optional local spec snippet (may be partial). Use it only as guidance:
+{spec_snip if spec_snip else "(not available)"}
+
+Schema:
+{{
+  "topic": "string",
+  "duration_minutes": {int(duration_minutes)},
+  "checkpoint_every": {JOURNEY_CHECKPOINT_EVERY},
+  "plan_markdown": "string (a numbered list of steps with objectives)",
+  "spec_alignment": ["string", ...],
+  "steps": [
+    {{
+      "objective": "string",
+      "question_text": "Markdown + LaTeX",
+      "markscheme_text": "Markdown + LaTeX, part-by-part marks, ends with TOTAL = <max_marks>",
+      "max_marks": integer,
+      "misconceptions": ["string", ...],
+      "spec_refs": ["string", ...]
+    }}
+  ]
+}}
+""".strip()
+
+        emph_txt = ", ".join([f"{k}={int(v)}" for k, v in (emphasis or {}).items()])
+
+        base_user = f"""
+Topic (plain English): {topic_plain_english}
+Tier: Higher
+Duration: {int(duration_minutes)} minutes
+Number of steps: {steps_n}
+Emphasis (0=none, 3=strong): {emph_txt}
+
+Requirements:
+- Steps should start simple and ramp up difficulty.
+- Include a mix of: recall, short reasoning, calculations, graphs/practicals as guided by emphasis.
+- Each step must include misconceptions (short bullet list).
+- For each step, include spec_refs (brief references like '4.2.1.2' OR descriptive headings). Do not quote large chunks.
+- Keep question_text and markscheme_text valid Markdown and MathJax-friendly LaTeX ($...$ / $$...$$).
+- For each step, markscheme_text MUST end with EXACTLY: TOTAL = <max_marks>
+""".strip()
+
+        if not repair:
+            user = base_user
+        else:
+            bullet_reasons = "\n".join([f"- {r}" for r in (reasons or [])]) or "- (unspecified)"
+            user = f"""
+Your previous JSON failed validation. Fix it and return corrected JSON only.
+
+Validation failures:
+{bullet_reasons}
+
+Keep:
+- Topic, duration, step count, and emphasis.
+
+Make sure:
+- steps list length is exactly {steps_n}
+- each step has objective, question_text, markscheme_text, max_marks, misconceptions
+- markscheme_text ends with TOTAL = <max_marks> for every step
+""".strip() + "\n\n" + base_user
+
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            max_completion_tokens=4000,
+            response_format={"type": "json_object"},
+        )
+        raw = response.choices[0].message.content or ""
+        return safe_parse_json(raw) or {}
+
+    data = _call_model(repair=False)
+    ok, reasons = _validate(data)
+    if not ok:
+        data2 = _call_model(repair=True, reasons=reasons)
+        ok2, reasons2 = _validate(data2)
+        if ok2:
+            data = data2
+        else:
+            data = data2 if isinstance(data2, dict) and data2 else data
+            data["warnings"] = reasons2[:12]
+
+    # Final clean-up / normalization (display-time normalization will still run)
+    steps = data.get("steps", [])
+    if not isinstance(steps, list):
+        steps = []
+    steps = steps[:steps_n]
+    for stp in steps:
+        if isinstance(stp, dict):
+            stp["objective"] = str(stp.get("objective", "") or "").strip()
+            stp["question_text"] = str(stp.get("question_text", "") or "").strip()
+            stp["markscheme_text"] = str(stp.get("markscheme_text", "") or "").strip()
+            try:
+                stp["max_marks"] = int(stp.get("max_marks", 1))
+            except Exception:
+                stp["max_marks"] = 1
+            if not isinstance(stp.get("misconceptions", []), list):
+                stp["misconceptions"] = []
+            stp["misconceptions"] = [str(x).strip() for x in stp.get("misconceptions", []) if str(x).strip()][:6]
+            if not isinstance(stp.get("spec_refs", []), list):
+                stp["spec_refs"] = []
+            stp["spec_refs"] = [str(x).strip() for x in stp.get("spec_refs", []) if str(x).strip()][:6]
+
+    return {
+        "topic": str(data.get("topic", "") or topic_plain_english).strip(),
+        "duration_minutes": int(duration_minutes),
+        "checkpoint_every": int(data.get("checkpoint_every", JOURNEY_CHECKPOINT_EVERY) or JOURNEY_CHECKPOINT_EVERY),
+        "plan_markdown": str(data.get("plan_markdown", "") or "").strip(),
+        "spec_alignment": [str(x).strip() for x in (data.get("spec_alignment", []) or []) if str(x).strip()][:20],
+        "steps": steps,
+        "warnings": [str(x) for x in (data.get("warnings", []) or [])][:12],
+    }
 
 # ============================================================
 # REPORT RENDERER
 # ============================================================
-
-# ============================================================
-# SPEC ALIGNMENT CHECKER (AI)
-#   Produces a quick report mapping a draft question to spec codes
-# ============================================================
-def check_spec_alignment_with_ai(
-    question_text: str,
-    markscheme_text: str,
-    spec_pack: Dict[str, Any],
-    target_spec_code: str = "",
-) -> Dict[str, Any]:
-    """
-    Returns a JSON-like dict with:
-    - best_fit_codes (top 3)
-    - is_within_target (bool)
-    - out_of_spec_risks (list[str])
-    - suggestions (list[str])
-    """
-    try:
-        client = get_client()
-    except Exception:
-        return {
-            "best_fit_codes": [],
-            "is_within_target": None,
-            "out_of_spec_risks": ["OpenAI client not available."],
-            "suggestions": [],
-        }
-
-    code_to_title, code_to_ht = build_spec_indexes(spec_pack)
-    allowed_topics = spec_pack.get("allowed_topics") or []
-
-    # Keep prompt compact
-    topic_lines = []
-    for t in allowed_topics:
-        c = str(t.get("code", "")).strip()
-        ttl = str(t.get("title", "")).strip()
-        if not c or not ttl:
-            continue
-        ht = bool(t.get("ht_only", False))
-        topic_lines.append(format_spec_option(c, ttl, ht))
-    topic_blob = "\n".join(topic_lines[:200])  # safeguard
-
-    target_title = code_to_title.get((target_spec_code or "").strip(), "")
-
-    excerpt = spec_excerpt_for_code(spec_pack, target_spec_code) if target_spec_code else ""
-
-    system = """
-You are a strict AQA GCSE Physics specification compliance checker.
-
-Your job:
-- Decide where a draft practice question fits in the AQA spec topic codes.
-- Flag anything likely to be out-of-spec (A-level/IB drift, advanced constants, advanced laws/equations, etc.).
-- Produce a concise report a teacher can use to vet quality.
-
-Return ONLY valid JSON (no markdown, no commentary).
-""".strip()
-
-    user = f"""
-Target spec section (if provided):
-- code: {target_spec_code or "(none)"}
-- title: {target_title or "(unknown)"}
-
-Spec anchor excerpt (may be sparse):
-{excerpt or "(none)"}
-
-Allowed topic codes (code title):
-{topic_blob}
-
-Draft question (Markdown + LaTeX):
-{(question_text or "").strip()}
-
-Draft mark scheme:
-{(markscheme_text or "").strip()}
-
-Return JSON with this schema:
-{{
-  "best_fit_codes": [{{"code":"4.x.x","title":"...","confidence":0.0,"why":"..."}}, ... up to 3],
-  "is_within_target": true/false/null,
-  "out_of_spec_risks": ["...", ...],
-  "suggestions": ["...", ...]
-}}
-Rules:
-- confidence is between 0 and 1.
-- If target code is missing/blank, set is_within_target to null.
-- Keep 'why' short.
-""".strip()
-
-    resp = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        temperature=0.2,
-    )
-
-    raw = (resp.choices[0].message.content or "").strip()
-    try:
-        data = json.loads(raw)
-    except Exception:
-        # Try to salvage JSON
-        m = re.search(r"\{.*\}", raw, flags=re.DOTALL)
-        data = json.loads(m.group(0)) if m else {"best_fit_codes": [], "is_within_target": None, "out_of_spec_risks": ["Could not parse checker output."], "suggestions": []}
-
-    # Light normalization
-    out = {
-        "best_fit_codes": data.get("best_fit_codes", []) if isinstance(data.get("best_fit_codes", []), list) else [],
-        "is_within_target": data.get("is_within_target", None),
-        "out_of_spec_risks": data.get("out_of_spec_risks", []) if isinstance(data.get("out_of_spec_risks", []), list) else [],
-        "suggestions": data.get("suggestions", []) if isinstance(data.get("suggestions", []), list) else [],
-    }
-    return out
-
-
-
 def render_report(report: dict):
     readback_md = (report.get("readback_markdown") or "").strip()
     if readback_md:
         st.markdown("**AI readback (what it thinks you wrote/drew):**")
         with st.container(border=True):
-            st.markdown(readback_md)
+            st.markdown(normalize_markdown_math(readback_md))
 
         rb_warn = report.get("readback_warnings", [])
         if rb_warn:
             st.caption("Readback notes:")
             for w in rb_warn[:6]:
-                st.write(f"- {w}")
+                st.markdown(normalize_markdown_math(f"- {w}"))
         st.divider()
 
-    st.markdown(f"**Marks:** {report.get('marks_awarded', 0)} / {report.get('max_marks', 0)}")
+    st.markdown(f"**Marks:** {int(report.get('marks_awarded', 0))} / {int(report.get('max_marks', 0))}")
     if report.get("summary"):
-        st.markdown(f"**Summary:** {report.get('summary')}")
+        st.markdown(normalize_markdown_math(f"**Summary:** {report.get('summary')}"))
     if report.get("feedback_points"):
         st.markdown("**Feedback:**")
         for p in report["feedback_points"]:
-            st.write(f"- {p}")
+            st.markdown(normalize_markdown_math(f"- {p}"))
     if report.get("next_steps"):
         st.markdown("**Next steps:**")
         for n in report["next_steps"]:
-            st.write(f"- {n}")
+            st.markdown(normalize_markdown_math(f"- {n}"))
 
 # ============================================================
 # NAVIGATION
@@ -2026,7 +1876,7 @@ if nav == "🧑‍🎓 Student":
                     else:
                         df2 = df2.sort_values(["assignment_name", "question_label", "id"], kind="mergesort")
                         df2["label"] = df2.apply(
-                            lambda r: f"{r['assignment_name']} | {r['question_label']} ({int(r['max_marks'])} marks) [id {int(r['id'])}]",
+                            lambda r: f"{r['assignment_name']} | {r['question_label']} ({int(r['max_marks'])} marks) [{r.get('question_type','single')}] [id {int(r['id'])}]",
                             axis=1
                         )
                         choices = df2["label"].tolist()
@@ -2057,9 +1907,18 @@ if nav == "🧑‍🎓 Student":
                                 else:
                                     st.session_state["cached_question_img"] = None
 
+                                # Reset attempt state
                                 st.session_state["feedback"] = None
                                 st.session_state["canvas_key"] += 1
                                 st.session_state["last_canvas_image_data"] = None
+
+                                # Reset Topic Journey state (if applicable)
+                                st.session_state["journey_step_index"] = 0
+                                st.session_state["journey_step_reports"] = []
+                                st.session_state["journey_checkpoint_notes"] = {}
+                                st.session_state["journey_active_id"] = int(chosen_id)
+                                st.session_state["journey_json_cache"] = None
+                                st.session_state["student_answer_text"] = ""
 
     if st.session_state.get("cached_q_row"):
         _qr = st.session_state["cached_q_row"]
@@ -2068,54 +1927,182 @@ if nav == "🧑‍🎓 Student":
     student_id = st.session_state.get("student_id", "") or ""
     q_row: Dict[str, Any] = st.session_state.get("cached_q_row") or {}
     question_img = st.session_state.get("cached_question_img")
-    max_marks = int(q_row.get("max_marks", 1)) if q_row else None
-    q_text = (q_row.get("question_text") or "").strip() if q_row else ""
+    q_type = str(q_row.get("question_type", "single") or "single").strip().lower() if q_row else "single"
+
     q_key = None
+    qid = None
     if q_row and q_row.get("id") is not None:
         try:
-            q_key = f"QB:{int(q_row['id'])}:{q_row.get('assignment_name','')}:{q_row.get('question_label','')}"
+            qid = int(q_row["id"])
+            q_key = f"QB:{qid}:{q_row.get('assignment_name','')}:{q_row.get('question_label','')}"
         except Exception:
             q_key = None
 
+    # If journey, parse journey JSON once per selection
+    journey_obj = None
+    if q_row and q_type == "journey":
+        if st.session_state.get("journey_json_cache") and st.session_state.get("journey_active_id") == qid:
+            journey_obj = st.session_state.get("journey_json_cache")
+        else:
+            raw = q_row.get("journey_json")
+            try:
+                if isinstance(raw, str):
+                    journey_obj = json.loads(raw) if raw.strip() else {}
+                elif isinstance(raw, dict):
+                    journey_obj = raw
+                else:
+                    journey_obj = {}
+            except Exception:
+                journey_obj = {}
+            st.session_state["journey_json_cache"] = journey_obj
+
     col1, col2 = st.columns([5, 4])
 
+    # -------------------------
+    # LEFT: Question + Answer
+    # -------------------------
     with col1:
-        st.subheader("📝 The Question")
-
         if not q_row:
+            st.subheader("📝 The Question")
             st.info("Select a question above to begin.")
-        else:
+        elif q_type != "journey":
+            st.subheader("📝 The Question")
+            max_marks = int(q_row.get("max_marks", 1))
+            q_text = (q_row.get("question_text") or "").strip()
+
             st.markdown("**Question**")
             with st.container(border=True):
                 if question_img is not None:
                     st.image(question_img, caption="Question image", use_container_width=True)
                 if q_text:
-                    st.markdown(q_text)
+                    st.markdown(normalize_markdown_math(q_text))
                 if (question_img is None) and (not q_text):
                     st.warning("This question has no question text or image.")
             st.caption(f"Max Marks: {max_marks}")
 
-        st.write("")
-        tab_type, tab_write = st.tabs(["⌨️ Type Answer", "✍️ Write Answer"])
+            st.write("")
+            tab_type, tab_write = st.tabs(["⌨️ Type Answer", "✍️ Write Answer"])
 
-        with tab_type:
-            answer = st.text_area("Type your working:", height=200, placeholder="Enter your answer here...", key="student_answer_text")
+            with tab_type:
+                answer = st.text_area("Type your working:", height=200, placeholder="Enter your answer here...", key="student_answer_text")
 
-            if st.button("Submit Text", type="primary", disabled=not AI_READY or not db_ready(), key="submit_text_btn"):
-                sid = _effective_student_id(student_id)
+                if st.button("Submit Text", type="primary", disabled=not AI_READY or not db_ready(), key="submit_text_btn"):
+                    sid = _effective_student_id(student_id)
 
-                if not answer.strip():
-                    st.toast("Please type an answer first.", icon="⚠️")
-                elif not q_row:
-                    st.error("Please select a question first.")
-                else:
-                    try:
-                        allowed_now, _, reset_str = _check_rate_limit_db(sid)
-                    except Exception:
-                        allowed_now, reset_str = True, ""
-                    if not allowed_now:
-                        st.error(f"You’ve reached the limit of {RATE_LIMIT_MAX} submissions per hour. Please try again at {reset_str}.")
+                    if not answer.strip():
+                        st.toast("Please type an answer first.", icon="⚠️")
+                    elif not q_row:
+                        st.error("Please select a question first.")
                     else:
+                        try:
+                            allowed_now, _, reset_str = _check_rate_limit_db(sid)
+                        except Exception:
+                            allowed_now, reset_str = True, ""
+                        if not allowed_now:
+                            st.error(f"You’ve reached the limit of {RATE_LIMIT_MAX} submissions per hour. Please try again at {reset_str}.")
+                        else:
+                            increment_rate_limit(sid)
+
+                            def task():
+                                ms_path = (st.session_state.get("cached_ms_path") or q_row.get("markscheme_image_path") or "").strip()
+                                ms_img = None
+                                if ms_path:
+                                    fp = (st.secrets.get("SUPABASE_URL", "") or "")[:40]
+                                    ms_bytes = cached_download_from_storage(ms_path, fp)
+                                    ms_img = bytes_to_pil(ms_bytes) if ms_bytes else None
+                                return get_gpt_feedback_from_bank(
+                                    student_answer=answer,
+                                    q_row=q_row,
+                                    is_student_image=False,
+                                    question_img=question_img,
+                                    markscheme_img=ms_img
+                                )
+
+                            st.session_state["feedback"] = _run_ai_with_progress(
+                                task_fn=task,
+                                ctx={"student_id": sid, "question": q_key or "", "mode": "text"},
+                                typical_range="5-10 seconds",
+                                est_seconds=9.0
+                            )
+
+                            if db_ready() and q_key:
+                                insert_attempt(student_id, q_key, st.session_state["feedback"], mode="text", question_bank_id=qid)
+
+            with tab_write:
+                tool_row = st.columns([2, 1])
+                with tool_row[0]:
+                    tool = st.radio("Tool", ["Pen", "Eraser"], horizontal=True, label_visibility="collapsed", key="canvas_tool")
+                clear_clicked = tool_row[1].button("🗑️ Clear", use_container_width=True, key="canvas_clear")
+
+                if clear_clicked:
+                    st.session_state["feedback"] = None
+                    st.session_state["last_canvas_image_data"] = None
+                    st.session_state["canvas_key"] += 1
+                    st.rerun()
+
+                stroke_width = 2 if tool == "Pen" else 30
+                stroke_color = "#000000" if tool == "Pen" else CANVAS_BG_HEX
+
+                canvas_result = st_canvas(
+                    stroke_width=stroke_width,
+                    stroke_color=stroke_color,
+                    background_color=CANVAS_BG_HEX,
+                    height=400,
+                    width=600,
+                    drawing_mode="freedraw",
+                    key=f"canvas_{st.session_state['canvas_key']}",
+                    display_toolbar=False,
+                    update_streamlit=True,
+                )
+
+                if canvas_result is not None and getattr(canvas_result, "image_data", None) is not None:
+                    if canvas_has_ink(canvas_result.image_data):
+                        st.session_state["last_canvas_image_data"] = canvas_result.image_data
+
+                submitted_writing = st.button(
+                    "Submit Writing",
+                    type="primary",
+                    disabled=not AI_READY or not db_ready(),
+                    key="submit_writing_btn",
+                )
+
+                if submitted_writing:
+                    sid = _effective_student_id(student_id)
+
+                    if not q_row:
+                        st.error("Please select a question first.")
+                    else:
+                        img_data = None
+                        if canvas_result is not None and getattr(canvas_result, "image_data", None) is not None:
+                            img_data = canvas_result.image_data
+                        if img_data is None:
+                            img_data = st.session_state.get("last_canvas_image_data")
+
+                        if img_data is None or (not canvas_has_ink(img_data)):
+                            st.toast("Canvas is blank. Write your answer first, then press Submit.", icon="⚠️")
+                            st.stop()
+
+                        try:
+                            allowed_now, _, reset_str = _check_rate_limit_db(sid)
+                        except Exception:
+                            allowed_now, reset_str = True, ""
+                        if not allowed_now:
+                            st.error(f"You’ve reached the limit of {RATE_LIMIT_MAX} submissions per hour. Please try again at {reset_str}.")
+                            st.stop()
+
+                        img_for_ai = preprocess_canvas_image(img_data)
+
+                        canvas_bytes = _encode_image_bytes(img_for_ai, "JPEG", quality=80)
+                        ok_canvas, msg_canvas = validate_image_file(canvas_bytes, CANVAS_MAX_MB, "canvas")
+                        if not ok_canvas:
+                            okc, outb, _outct, err = _compress_bytes_to_limit(
+                                canvas_bytes, CANVAS_MAX_MB, _purpose="canvas", prefer_fmt="JPEG"
+                            )
+                            if not okc:
+                                st.error(err or msg_canvas)
+                                st.stop()
+                            img_for_ai = Image.open(io.BytesIO(outb)).convert("RGB")
+
                         increment_rate_limit(sid)
 
                         def task():
@@ -2126,134 +2113,332 @@ if nav == "🧑‍🎓 Student":
                                 ms_bytes = cached_download_from_storage(ms_path, fp)
                                 ms_img = bytes_to_pil(ms_bytes) if ms_bytes else None
                             return get_gpt_feedback_from_bank(
-                                student_answer=answer,
+                                student_answer=img_for_ai,
                                 q_row=q_row,
-                                is_student_image=False,
+                                is_student_image=True,
                                 question_img=question_img,
                                 markscheme_img=ms_img
                             )
 
                         st.session_state["feedback"] = _run_ai_with_progress(
                             task_fn=task,
-                            ctx={"student_id": sid, "question": q_key or "", "mode": "text"},
-                            typical_range="5-10 seconds",
-                            est_seconds=9.0
+                            ctx={"student_id": sid, "question": q_key or "", "mode": "writing"},
+                            typical_range="8-15 seconds",
+                            est_seconds=13.0
                         )
 
                         if db_ready() and q_key:
-                            insert_attempt(student_id, q_key, st.session_state["feedback"], mode="text")
+                            insert_attempt(student_id, q_key, st.session_state["feedback"], mode="writing", question_bank_id=qid)
 
-        with tab_write:
-            tool_row = st.columns([2, 1])
-            with tool_row[0]:
-                tool = st.radio("Tool", ["Pen", "Eraser"], horizontal=True, label_visibility="collapsed", key="canvas_tool")
-            clear_clicked = tool_row[1].button("🗑️ Clear", use_container_width=True, key="canvas_clear")
-
-            if clear_clicked:
-                st.session_state["feedback"] = None
-                st.session_state["last_canvas_image_data"] = None
-                st.session_state["canvas_key"] += 1
-                st.rerun()
-
-            stroke_width = 2 if tool == "Pen" else 30
-            stroke_color = "#000000" if tool == "Pen" else CANVAS_BG_HEX
-
-            canvas_result = st_canvas(
-                stroke_width=stroke_width,
-                stroke_color=stroke_color,
-                background_color=CANVAS_BG_HEX,
-                height=400,
-                width=600,
-                drawing_mode="freedraw",
-                key=f"canvas_{st.session_state['canvas_key']}",
-                display_toolbar=False,
-                update_streamlit=True,
-            )
-
-            if canvas_result is not None and getattr(canvas_result, "image_data", None) is not None:
-                if canvas_has_ink(canvas_result.image_data):
-                    st.session_state["last_canvas_image_data"] = canvas_result.image_data
-
-            submitted_writing = st.button(
-                "Submit Writing",
-                type="primary",
-                disabled=not AI_READY or not db_ready(),
-                key="submit_writing_btn",
-            )
-
-            if submitted_writing:
-                sid = _effective_student_id(student_id)
-
-                if not q_row:
-                    st.error("Please select a question first.")
+        else:
+            # -------------------------
+            # Topic Journey student flow (one step at a time)
+            # -------------------------
+            st.subheader("🧭 Topic Journey")
+            if not isinstance(journey_obj, dict) or not journey_obj.get("steps"):
+                st.error("This Topic Journey is missing its steps JSON.")
+            else:
+                steps = journey_obj.get("steps", [])
+                if not isinstance(steps, list) or not steps:
+                    st.error("This Topic Journey has no steps.")
                 else:
-                    img_data = None
-                    if canvas_result is not None and getattr(canvas_result, "image_data", None) is not None:
-                        img_data = canvas_result.image_data
-                    if img_data is None:
-                        img_data = st.session_state.get("last_canvas_image_data")
+                    step_i = int(st.session_state.get("journey_step_index", 0) or 0)
+                    step_i = max(0, min(step_i, len(steps) - 1))
+                    st.session_state["journey_step_index"] = step_i
 
-                    if img_data is None or (not canvas_has_ink(img_data)):
-                        st.toast("Canvas is blank. Write your answer first, then press Submit.", icon="⚠️")
-                        st.stop()
+                    checkpoint_every = int(journey_obj.get("checkpoint_every", JOURNEY_CHECKPOINT_EVERY) or JOURNEY_CHECKPOINT_EVERY)
 
-                    try:
-                        allowed_now, _, reset_str = _check_rate_limit_db(sid)
-                    except Exception:
-                        allowed_now, reset_str = True, ""
-                    if not allowed_now:
-                        st.error(f"You’ve reached the limit of {RATE_LIMIT_MAX} submissions per hour. Please try again at {reset_str}.")
-                        st.stop()
+                    st.caption(f"Step {step_i + 1} of {len(steps)}")
+                    step = steps[step_i] if step_i < len(steps) else {}
 
-                    img_for_ai = preprocess_canvas_image(img_data)
+                    obj = str(step.get("objective", "") or "").strip()
+                    qtxt = str(step.get("question_text", "") or "").strip()
+                    mm = clamp_int(step.get("max_marks", 1), 1, 50, default=1)
 
-                    canvas_bytes = _encode_image_bytes(img_for_ai, "JPEG", quality=80)
-                    ok_canvas, msg_canvas = validate_image_file(canvas_bytes, CANVAS_MAX_MB, "canvas")
-                    if not ok_canvas:
-                        okc, outb, _outct, err = _compress_bytes_to_limit(
-                            canvas_bytes, CANVAS_MAX_MB, _purpose="canvas", prefer_fmt="JPEG"
+                    with st.container(border=True):
+                        if obj:
+                            st.markdown(normalize_markdown_math(f"**Objective:** {obj}"))
+                        if qtxt:
+                            st.markdown(normalize_markdown_math(qtxt))
+                        else:
+                            st.warning("This step has no question text.")
+
+                    st.caption(f"Max Marks (this step): {mm}")
+
+                    # Teacher-only: spec alignment expander (collapsed by default)
+                    if st.session_state.get("is_teacher"):
+                        with st.expander("Show spec alignment (teacher only)", expanded=False):
+                            spec_align = journey_obj.get("spec_alignment", [])
+                            if isinstance(spec_align, list) and spec_align:
+                                st.markdown(normalize_markdown_math("**Journey spec alignment:**"))
+                                for sref in spec_align[:20]:
+                                    st.markdown(normalize_markdown_math(f"- {sref}"))
+                            spec_refs = step.get("spec_refs", [])
+                            if isinstance(spec_refs, list) and spec_refs:
+                                st.markdown(normalize_markdown_math("**This step:**"))
+                                for sref in spec_refs[:10]:
+                                    st.markdown(normalize_markdown_math(f"- {sref}"))
+
+                    st.write("")
+                    tab_type, tab_write = st.tabs(["⌨️ Type Answer", "✍️ Write Answer"])
+
+                    # Build a step-level "q_row" compatible with the marker
+                    step_q_row = {
+                        "max_marks": int(mm),
+                        "question_text": qtxt,
+                        "markscheme_text": str(step.get("markscheme_text", "") or "").strip(),
+                    }
+
+                    with tab_type:
+                        answer = st.text_area("Type your working:", height=200, placeholder="Enter your answer here...", key="student_answer_text")
+
+                        if st.button("Submit Text", type="primary", disabled=not AI_READY or not db_ready(), key="submit_text_btn"):
+                            sid = _effective_student_id(student_id)
+
+                            if not answer.strip():
+                                st.toast("Please type an answer first.", icon="⚠️")
+                            else:
+                                try:
+                                    allowed_now, _, reset_str = _check_rate_limit_db(sid)
+                                except Exception:
+                                    allowed_now, reset_str = True, ""
+                                if not allowed_now:
+                                    st.error(f"You’ve reached the limit of {RATE_LIMIT_MAX} submissions per hour. Please try again at {reset_str}.")
+                                else:
+                                    increment_rate_limit(sid)
+
+                                    def task():
+                                        return get_gpt_feedback_from_bank(
+                                            student_answer=answer,
+                                            q_row=step_q_row,
+                                            is_student_image=False,
+                                            question_img=None,
+                                            markscheme_img=None
+                                        )
+
+                                    st.session_state["feedback"] = _run_ai_with_progress(
+                                        task_fn=task,
+                                        ctx={"student_id": sid, "question": q_key or "", "mode": f"journey_text_s{step_i}"},
+                                        typical_range="5-10 seconds",
+                                        est_seconds=9.0
+                                    )
+
+                                    # Store step report history
+                                    reports = st.session_state.get("journey_step_reports", [])
+                                    if not isinstance(reports, list):
+                                        reports = []
+                                    while len(reports) <= step_i:
+                                        reports.append(None)
+                                    reports[step_i] = st.session_state["feedback"]
+                                    st.session_state["journey_step_reports"] = reports
+
+                                    # Create checkpoint notes (no extra AI call, deterministic)
+                                    if ((step_i + 1) % checkpoint_every == 0) or (step_i == len(steps) - 1):
+                                        last_reports = [r for r in reports[max(0, step_i - (checkpoint_every - 1)) : step_i + 1] if isinstance(r, dict)]
+                                        mastered = []
+                                        improve = []
+                                        for r in last_reports:
+                                            # heuristically: if full marks, treat next_steps as "stretch", otherwise focus on next_steps
+                                            if int(r.get("marks_awarded", 0)) >= int(r.get("max_marks", 1)):
+                                                mastered.extend(r.get("feedback_points", [])[:2])
+                                            else:
+                                                improve.extend(r.get("next_steps", [])[:3])
+                                        mastered = [m for m in mastered if str(m).strip()][:6]
+                                        improve = [n for n in improve if str(n).strip()][:6]
+
+                                        md = "### Checkpoint\n"
+                                        md += "**Mastered (recent):**\n"
+                                        md += "\n".join([f"- {x}" for x in mastered]) if mastered else "- (keep going - you're building foundations)"
+                                        md += "\n\n**Next improvements:**\n"
+                                        md += "\n".join([f"- {x}" for x in improve]) if improve else "- (no major issues detected in recent steps)"
+
+                                        notes = st.session_state.get("journey_checkpoint_notes", {}) or {}
+                                        if not isinstance(notes, dict):
+                                            notes = {}
+                                        notes[str(step_i)] = md
+                                        st.session_state["journey_checkpoint_notes"] = notes
+
+                                    if db_ready() and q_key:
+                                        insert_attempt(student_id, q_key, st.session_state["feedback"], mode="journey_text", question_bank_id=qid, step_index=step_i)
+
+                    with tab_write:
+                        tool_row = st.columns([2, 1])
+                        with tool_row[0]:
+                            tool = st.radio("Tool", ["Pen", "Eraser"], horizontal=True, label_visibility="collapsed", key="canvas_tool")
+                        clear_clicked = tool_row[1].button("🗑️ Clear", use_container_width=True, key="canvas_clear")
+
+                        if clear_clicked:
+                            st.session_state["feedback"] = None
+                            st.session_state["last_canvas_image_data"] = None
+                            st.session_state["canvas_key"] += 1
+                            st.rerun()
+
+                        stroke_width = 2 if tool == "Pen" else 30
+                        stroke_color = "#000000" if tool == "Pen" else CANVAS_BG_HEX
+
+                        canvas_result = st_canvas(
+                            stroke_width=stroke_width,
+                            stroke_color=stroke_color,
+                            background_color=CANVAS_BG_HEX,
+                            height=400,
+                            width=600,
+                            drawing_mode="freedraw",
+                            key=f"canvas_{st.session_state['canvas_key']}",
+                            display_toolbar=False,
+                            update_streamlit=True,
                         )
-                        if not okc:
-                            st.error(err or msg_canvas)
-                            st.stop()
-                        img_for_ai = Image.open(io.BytesIO(outb)).convert("RGB")
 
-                    increment_rate_limit(sid)
+                        if canvas_result is not None and getattr(canvas_result, "image_data", None) is not None:
+                            if canvas_has_ink(canvas_result.image_data):
+                                st.session_state["last_canvas_image_data"] = canvas_result.image_data
 
-                    def task():
-                        ms_path = (st.session_state.get("cached_ms_path") or q_row.get("markscheme_image_path") or "").strip()
-                        ms_img = None
-                        if ms_path:
-                            fp = (st.secrets.get("SUPABASE_URL", "") or "")[:40]
-                            ms_bytes = cached_download_from_storage(ms_path, fp)
-                            ms_img = bytes_to_pil(ms_bytes) if ms_bytes else None
-                        return get_gpt_feedback_from_bank(
-                            student_answer=img_for_ai,
-                            q_row=q_row,
-                            is_student_image=True,
-                            question_img=question_img,
-                            markscheme_img=ms_img
+                        submitted_writing = st.button(
+                            "Submit Writing",
+                            type="primary",
+                            disabled=not AI_READY or not db_ready(),
+                            key="submit_writing_btn",
                         )
 
-                    st.session_state["feedback"] = _run_ai_with_progress(
-                        task_fn=task,
-                        ctx={"student_id": sid, "question": q_key or "", "mode": "writing"},
-                        typical_range="8-15 seconds",
-                        est_seconds=13.0
-                    )
+                        if submitted_writing:
+                            sid = _effective_student_id(student_id)
 
-                    if db_ready() and q_key:
-                        insert_attempt(student_id, q_key, st.session_state["feedback"], mode="writing")
+                            img_data = None
+                            if canvas_result is not None and getattr(canvas_result, "image_data", None) is not None:
+                                img_data = canvas_result.image_data
+                            if img_data is None:
+                                img_data = st.session_state.get("last_canvas_image_data")
 
+                            if img_data is None or (not canvas_has_ink(img_data)):
+                                st.toast("Canvas is blank. Write your answer first, then press Submit.", icon="⚠️")
+                                st.stop()
+
+                            try:
+                                allowed_now, _, reset_str = _check_rate_limit_db(sid)
+                            except Exception:
+                                allowed_now, reset_str = True, ""
+                            if not allowed_now:
+                                st.error(f"You’ve reached the limit of {RATE_LIMIT_MAX} submissions per hour. Please try again at {reset_str}.")
+                                st.stop()
+
+                            img_for_ai = preprocess_canvas_image(img_data)
+
+                            canvas_bytes = _encode_image_bytes(img_for_ai, "JPEG", quality=80)
+                            ok_canvas, msg_canvas = validate_image_file(canvas_bytes, CANVAS_MAX_MB, "canvas")
+                            if not ok_canvas:
+                                okc, outb, _outct, err = _compress_bytes_to_limit(
+                                    canvas_bytes, CANVAS_MAX_MB, _purpose="canvas", prefer_fmt="JPEG"
+                                )
+                                if not okc:
+                                    st.error(err or msg_canvas)
+                                    st.stop()
+                                img_for_ai = Image.open(io.BytesIO(outb)).convert("RGB")
+
+                            increment_rate_limit(sid)
+
+                            def task():
+                                return get_gpt_feedback_from_bank(
+                                    student_answer=img_for_ai,
+                                    q_row=step_q_row,
+                                    is_student_image=True,
+                                    question_img=None,
+                                    markscheme_img=None
+                                )
+
+                            st.session_state["feedback"] = _run_ai_with_progress(
+                                task_fn=task,
+                                ctx={"student_id": sid, "question": q_key or "", "mode": f"journey_writing_s{step_i}"},
+                                typical_range="8-15 seconds",
+                                est_seconds=13.0
+                            )
+
+                            # Store step report history
+                            reports = st.session_state.get("journey_step_reports", [])
+                            if not isinstance(reports, list):
+                                reports = []
+                            while len(reports) <= step_i:
+                                reports.append(None)
+                            reports[step_i] = st.session_state["feedback"]
+                            st.session_state["journey_step_reports"] = reports
+
+                            # Create checkpoint notes (deterministic)
+                            if ((step_i + 1) % checkpoint_every == 0) or (step_i == len(steps) - 1):
+                                last_reports = [r for r in reports[max(0, step_i - (checkpoint_every - 1)) : step_i + 1] if isinstance(r, dict)]
+                                mastered = []
+                                improve = []
+                                for r in last_reports:
+                                    if int(r.get("marks_awarded", 0)) >= int(r.get("max_marks", 1)):
+                                        mastered.extend(r.get("feedback_points", [])[:2])
+                                    else:
+                                        improve.extend(r.get("next_steps", [])[:3])
+                                mastered = [m for m in mastered if str(m).strip()][:6]
+                                improve = [n for n in improve if str(n).strip()][:6]
+
+                                md = "### Checkpoint\n"
+                                md += "**Mastered (recent):**\n"
+                                md += "\n".join([f"- {x}" for x in mastered]) if mastered else "- (keep going - you're building foundations)"
+                                md += "\n\n**Next improvements:**\n"
+                                md += "\n".join([f"- {x}" for x in improve]) if improve else "- (no major issues detected in recent steps)"
+
+                                notes = st.session_state.get("journey_checkpoint_notes", {}) or {}
+                                if not isinstance(notes, dict):
+                                    notes = {}
+                                notes[str(step_i)] = md
+                                st.session_state["journey_checkpoint_notes"] = notes
+
+                            if db_ready() and q_key:
+                                insert_attempt(student_id, q_key, st.session_state["feedback"], mode="journey_writing", question_bank_id=qid, step_index=step_i)
+
+    # -------------------------
+    # RIGHT: Feedback
+    # -------------------------
     with col2:
-        st.subheader("👨‍🏫 Report")
+        st.subheader("👨‍🏫 Feedback")
         with st.container(border=True):
             if st.session_state["feedback"]:
                 render_report(st.session_state["feedback"])
+
+                # Journey checkpoint notes (if any)
+                if q_row and q_type == "journey":
+                    step_i = int(st.session_state.get("journey_step_index", 0) or 0)
+                    notes = st.session_state.get("journey_checkpoint_notes", {}) or {}
+                    note_md = notes.get(str(step_i))
+                    if note_md:
+                        st.divider()
+                        st.markdown(normalize_markdown_math(note_md))
+
                 st.divider()
-                if st.button("Start New Attempt", use_container_width=True, key="new_attempt"):
-                    st.session_state["feedback"] = None
-                    st.rerun()
+
+                if q_row and q_type == "journey":
+                    step_i = int(st.session_state.get("journey_step_index", 0) or 0)
+                    steps = (journey_obj or {}).get("steps", [])
+                    total_steps = len(steps) if isinstance(steps, list) else 0
+
+                    cbtn1, cbtn2 = st.columns(2)
+                    with cbtn1:
+                        if st.button("Redo this step", use_container_width=True, key="journey_redo"):
+                            st.session_state["feedback"] = None
+                            st.session_state["last_canvas_image_data"] = None
+                            st.session_state["canvas_key"] += 1
+                            st.session_state["student_answer_text"] = ""
+                            st.rerun()
+                    with cbtn2:
+                        next_disabled = (total_steps <= 0) or (step_i >= total_steps - 1)
+                        label = "Finish" if next_disabled else "Next step"
+                        if st.button(label, use_container_width=True, disabled=next_disabled, key="journey_next"):
+                            st.session_state["feedback"] = None
+                            st.session_state["last_canvas_image_data"] = None
+                            st.session_state["canvas_key"] += 1
+                            st.session_state["student_answer_text"] = ""
+                            st.session_state["journey_step_index"] = min(step_i + 1, max(0, total_steps - 1))
+                            st.rerun()
+
+                    if total_steps > 0 and step_i >= total_steps - 1:
+                        st.success("Journey complete! You can redo the final step, or choose a new assignment.")
+                else:
+                    if st.button("Start New Attempt", use_container_width=True, key="new_attempt"):
+                        st.session_state["feedback"] = None
+                        st.session_state["student_answer_text"] = ""
+                        st.rerun()
             else:
                 st.info("Submit an answer to receive feedback.")
 
@@ -2485,26 +2670,71 @@ else:
                             st.caption(f"ID: {row.get('id', '')}")
 
                         pv1, pv2 = st.columns(2)
+if str(row.get("question_type", "single") or "single").strip().lower() == "journey":
+    # Journey preview (teacher)
+    rawj = row.get("journey_json")
+    try:
+        if isinstance(rawj, str):
+            journey = json.loads(rawj) if rawj.strip() else {}
+        elif isinstance(rawj, dict):
+            journey = rawj
+        else:
+            journey = {}
+    except Exception:
+        journey = {}
 
-                        with pv1:
-                            st.markdown("**Question (student view)**")
-                            with st.container(border=True):
-                                if q_img is not None:
-                                    st.image(q_img, use_container_width=True)
-                                if q_text:
-                                    st.markdown(q_text)
-                                if (q_img is None) and (not q_text):
-                                    st.caption("No question text/image.")
+    plan_md = (journey.get("plan_markdown") or q_text or "").strip()
+    steps = journey.get("steps", [])
+    if not isinstance(steps, list):
+        steps = []
 
-                        with pv2:
-                            st.markdown("**Mark scheme (teacher only)**")
-                            with st.container(border=True):
-                                if ms_img is not None:
-                                    st.image(ms_img, use_container_width=True)
-                                if ms_text:
-                                    st.markdown(ms_text)
-                                if (ms_img is None) and (not ms_text):
-                                    st.caption("No mark scheme text/image (image-only teacher uploads are supported).")
+    with pv1:
+        st.markdown("**Topic Journey plan**")
+        with st.container(border=True):
+            if plan_md:
+                st.markdown(normalize_markdown_math(plan_md))
+            else:
+                st.caption("No plan text.")
+        st.caption(f"Steps: {len(steps)}")
+
+        for i, stp in enumerate(steps[:50]):
+            if not isinstance(stp, dict):
+                continue
+            with st.expander(f"Step {i+1}: {str(stp.get('objective','') or '')[:80]}", expanded=(i == 0)):
+                st.markdown(normalize_markdown_math(str(stp.get("question_text", "") or "")))
+
+    with pv2:
+        st.markdown("**Mark schemes (teacher only)**")
+        for i, stp in enumerate(steps[:50]):
+            if not isinstance(stp, dict):
+                continue
+            with st.expander(f"Step {i+1} mark scheme", expanded=(i == 0)):
+                st.markdown(normalize_markdown_math(str(stp.get("markscheme_text", "") or "")))
+                miscon = stp.get("misconceptions", [])
+                if isinstance(miscon, list) and miscon:
+                    st.markdown("**Common misconceptions:**")
+                    for m in miscon[:6]:
+                        st.markdown(normalize_markdown_math(f"- {m}"))
+else:
+    with pv1:
+        st.markdown("**Question**")
+        with st.container(border=True):
+            if q_img is not None:
+                st.image(q_img, use_container_width=True)
+            if q_text:
+                st.markdown(normalize_markdown_math(q_text))
+            if (q_img is None) and (not q_text):
+                st.caption("No question text/image (image-only teacher uploads are supported).")
+
+    with pv2:
+        st.markdown("**Mark scheme (teacher only)**")
+        with st.container(border=True):
+            if ms_img is not None:
+                st.image(ms_img, use_container_width=True)
+            if ms_text:
+                st.markdown(normalize_markdown_math(ms_text))
+            if (ms_img is None) and (not ms_text):
+                st.caption("No mark scheme text/image (image-only teacher uploads are supported).")
 
                 st.divider()
                 st.write("### Recent question bank entries")
@@ -2514,282 +2744,321 @@ else:
                 else:
                     st.info("No recent entries.")
 
-            # -------------------------
+                        # -------------------------
             # AI generator
             # -------------------------
             with tab_ai:
-                st.write("## 🤖 Generate practice question with AI (teacher vetting required)")
+                st.write("## 🤖 AI generator (teacher vetting required)")
+                gen_mode = st.radio("Generator", ["Single question", "Topic Journey"], horizontal=True, key="gen_mode")
 
-                # -------------------------
-                # Spec guardrail selector
-                # -------------------------
-                spec_pack = None
-                target_spec_code = ""
-                spec_path = ""
-                try:
-                    spec_files = list_spec_json_files()
-                    # Prefer default file if present
-                    try:
-                        default_idx = [Path(p).name for p in spec_files].index(DEFAULT_SPEC_FILENAME)
-                    except Exception:
-                        default_idx = 0
-                    spec_path = st.selectbox(
-                        "Spec pack JSON (for guardrails)",
-                        options=spec_files,
-                        index=default_idx if spec_files else 0,
-                        format_func=lambda p: Path(p).name,
-                        key="spec_pack_path",
-                        help="Put your extracted spec JSON in ./specs/ (repo root). Example: specs/aqa_gcse_physics.json",
-                    )
-                    try:
-                        spec_pack = load_spec_pack(spec_path)
-                    except Exception as e:
-                        spec_pack = None
-                        st.warning(f"Spec pack not loaded: {e}")
-                except Exception as e:
-                    spec_pack = None
-                    st.warning(f"Spec pack discovery error: {e}")
+                if gen_mode == "Single question":
+                    st.caption("Generate a single GCSE Higher question + mark scheme. You must vet and edit before saving.")
 
-                if spec_pack:
-                    code_to_title, code_to_ht = build_spec_indexes(spec_pack)
+                    gen_c1, gen_c2 = st.columns([2, 1])
+                    with gen_c1:
+                        topic_mode = st.radio("Topic input", ["Choose from AQA list", "Describe a topic"], horizontal=True, key="topic_mode")
+                        if topic_mode == "Choose from AQA list":
+                            topic_choice = st.selectbox("AQA GCSE Physics Higher topic", AQA_GCSE_HIGHER_TOPICS, key="topic_choice")
+                            topic_text = topic_choice
+                        else:
+                            topic_text = st.text_input("Describe the topic", placeholder="e.g. stopping distance with thinking vs braking distance", key="topic_text")
 
-                    def _code_sort_key(c: str):
-                        parts = []
-                        for p in str(c).split("."):
-                            if p.isdigit():
-                                parts.append(int(p))
-                            else:
-                                parts.append(p)
-                        return parts
+                        qtype = st.selectbox("Question type", QUESTION_TYPES, key="gen_qtype")
+                        difficulty = st.selectbox("Difficulty", DIFFICULTIES, key="gen_difficulty")
+                        marks_req = st.number_input("Max marks (target)", min_value=1, max_value=12, value=4, step=1, key="gen_marks")
 
-                    codes = sorted(code_to_title.keys(), key=_code_sort_key)
-                    target_spec_code = st.selectbox(
-                        "Target AQA spec section (code)",
-                        options=[""] + codes,
-                        format_func=lambda c: "(no target guardrail)" if c == "" else f"{c} - {code_to_title.get(c, '')}{' [HT]' if code_to_ht.get(c) else ''}",
-                        key="target_spec_code",
-                        help="The generator will be anchored to this section and the app will produce an alignment report after drafting.",
-                    )
-
-                    # Quick spec pack quality indicator
-                    content_map = normalized_content_map(spec_pack)
-                    nonempty = 0
-                    for _, v in content_map.items():
-                        lines = (v or {}).get("content") or []
-                        if any(str(x).strip() for x in lines):
-                            nonempty += 1
-                    st.caption(f"Spec pack content coverage: {nonempty}/{max(len(content_map),1)} sections have extracted wording. If this is low, re-run your extractor with content enabled.")
-
-                    if target_spec_code:
-                        path_pairs = spec_path_for_code(target_spec_code, code_to_title)
-                        if path_pairs:
-                            st.caption("Spec path: " + "  ›  ".join([f"{c} {t}" for c, t in path_pairs]))
-                        excerpt = spec_excerpt_for_code(spec_pack, target_spec_code)
-                        with st.expander("Spec anchor excerpt (used for guardrails)", expanded=False):
-                            if excerpt.strip():
-                                st.text(excerpt.strip()[:3000])
-                            else:
-                                st.info("No extracted wording found for this code in the spec pack (titles only). Consider improving the extractor output.")
-                else:
-                    st.info("No spec pack loaded. The generator will still work, but without spec cross-checking. Add JSON to ./specs/ to enable guardrails.")
-
-                gen_c1, gen_c2 = st.columns([2, 1])
-                with gen_c1:
-                    topic_mode = st.radio("Topic input", ["Choose from AQA list", "Describe a topic"], horizontal=True, key="topic_mode")
-                    if topic_mode == "Choose from AQA list":
-                        topic_choice = st.selectbox("AQA GCSE Physics Higher topic", AQA_GCSE_HIGHER_TOPICS, key="topic_choice")
-                        topic_text = topic_choice
-                    else:
-                        topic_text = st.text_input("Describe the topic", placeholder="e.g. stopping distance with thinking vs braking distance", key="topic_text")
-
-                    qtype = st.selectbox("Question type", QUESTION_TYPES, key="gen_qtype")
-                    difficulty = st.selectbox("Difficulty", DIFFICULTIES, key="gen_difficulty")
-                    marks_req = st.number_input("Max marks (target)", min_value=1, max_value=12, value=4, step=1, key="gen_marks")
-
-                    extra_instr = st.text_area(
-                        "Optional constraints for the AI",
-                        height=80,
-                        placeholder="e.g. Include one tricky unit conversion. Use g = 9.8 N/kg. Require a final answer with units.",
-                        key="gen_extra"
-                    )
-
-                    assignment_name_ai = st.text_input("Assignment name for saving", value="AI Practice", key="gen_assignment")
-
-                with gen_c2:
-                    st.caption("Workflow: Generate draft → edit/vet → Approve & Save.")
-                    gen_clicked = st.button("Generate draft", type="primary", use_container_width=True, disabled=not AI_READY, key="gen_btn")
-
-                    if st.button("Clear draft", use_container_width=True, key="clear_draft"):
-                        st.session_state["ai_draft"] = None
-                        st.rerun()
-
-                if gen_clicked:
-                    if not (topic_text or "").strip():
-                        st.warning("Please choose or describe a topic first.")
-                    else:
-                        def task_generate():
-                            return generate_practice_question_with_ai(
-                                topic_text=topic_text.strip(),
-                                difficulty=difficulty,
-                                qtype=qtype,
-                                marks=int(marks_req),
-                                extra_instructions=extra_instr or "",
-                                spec_pack=spec_pack,
-                                target_spec_code=target_spec_code,
-                            )
-
-                        draft_raw = _run_ai_with_progress(
-                            task_fn=task_generate,
-                            ctx={"student_id": "teacher", "question": "AI_GENERATOR", "mode": "generate"},
-                            typical_range="5-12 seconds",
-                            est_seconds=10.0
+                        extra_instr = st.text_area(
+                            "Optional constraints for the AI",
+                            height=80,
+                            placeholder="e.g. Include one tricky unit conversion. Use g = 9.8 N/kg. Require a final answer with units.",
+                            key="gen_extra"
                         )
 
-                        qtxt = str(draft_raw.get("question_text", "") or "").strip()
-                        mstxt = str(draft_raw.get("markscheme_text", "") or "").strip()
-                        mm = clamp_int(draft_raw.get("max_marks", int(marks_req)), 1, 50, default=int(marks_req))
-                        tags = draft_raw.get("tags", [])
-                        warnings = draft_raw.get("warnings", [])
-                        if not isinstance(tags, list):
-                            tags = []
-                        if not isinstance(warnings, list):
-                            warnings = []
+                        assignment_name_ai = st.text_input("Assignment name for saving", value="AI Practice", key="gen_assignment")
 
-                        if not qtxt or not mstxt:
-                            st.error("AI did not return a valid draft. Please try again.")
+                    with gen_c2:
+                        st.caption("Workflow: Generate draft → edit/vet → Approve & Save.")
+                        gen_clicked = st.button("Generate draft", type="primary", use_container_width=True, disabled=not AI_READY, key="gen_btn")
+
+                        if st.button("Clear draft", use_container_width=True, key="clear_draft"):
+                            st.session_state["ai_draft"] = None
+                            st.rerun()
+
+                    if gen_clicked:
+                        if not (topic_text or "").strip():
+                            st.warning("Please choose or describe a topic first.")
                         else:
-                            token = pysecrets.token_hex(3)
-                            default_label = f"AI-{slugify(topic_text)[:24]}-{token}"
+                            def task_generate():
+                                return generate_practice_question_with_ai(
+                                    topic_text=topic_text.strip(),
+                                    difficulty=difficulty,
+                                    qtype=qtype,
+                                    marks=int(marks_req),
+                                    extra_instructions=extra_instr or "",
+                                )
 
-                            st.session_state["ai_draft"] = {
-                                "assignment_name": (assignment_name_ai or "").strip() or "AI Practice",
-                                "question_label": default_label,
-                                "max_marks": int(mm),
-                                "tags": merged_tags[:10],
-                                "target_spec_code": target_spec_code,
-                                "spec_report": spec_report,
-                                "question_text": qtxt,
-                                "markscheme_text": mstxt,
-                                "warnings": warnings[:10],
-                            }
-
-                            # Spec alignment check (quick report)
-                            spec_report = None
-                            if spec_pack and target_spec_code:
-                                try:
-                                    spec_report = check_spec_alignment_with_ai(
-                                        question_text=qtxt,
-                                        markscheme_text=mstxt,
-                                        spec_pack=spec_pack,
-                                        target_spec_code=target_spec_code,
-                                    )
-                                except Exception as _e:
-                                    spec_report = {"best_fit_codes": [], "is_within_target": None, "out_of_spec_risks": [f"Spec check error: {_e}"], "suggestions": []}
-
-                            # Add spec tags (stored in DB tags list) for traceability
-                            code_to_title, _code_to_ht = build_spec_indexes(spec_pack) if spec_pack else ({}, {})
-                            spec_tags = extract_spec_tags(target_spec_code, code_to_title) if (spec_pack and target_spec_code) else []
-                            # Merge tags safely
-                            merged_tags = [str(t).strip() for t in tags if str(t).strip()]
-                            for stg in spec_tags:
-                                if stg not in merged_tags:
-                                    merged_tags.append(stg)
-
-                            st.success("Draft generated. Please vet and edit below, then approve to save.")
-
-                if st.session_state.get("ai_draft"):
-                    d = st.session_state["ai_draft"]
-
-                    if d.get("warnings"):
-                        st.warning("AI draft warnings (auto-check):\n\n" + "\n".join([f"- {w}" for w in d["warnings"]]))
-
-
-                    # Spec alignment report
-                    if d.get("spec_report") is not None:
-                        rep = d.get("spec_report") or {}
-                        with st.expander("🧭 Spec alignment report (AI check)", expanded=False):
-                            tgt = st.session_state.get("target_spec_code", "") or d.get("target_spec_code", "")
-                            if tgt:
-                                st.markdown(f"**Target code:** `{tgt}`")
-                            bfc = rep.get("best_fit_codes", [])
-                            if bfc:
-                                st.markdown("**Best-fit spec codes (top matches):**")
-                                for item in bfc[:3]:
-                                    c = item.get("code", "")
-                                    ttl = item.get("title", "")
-                                    conf = item.get("confidence", None)
-                                    why = item.get("why", "")
-                                    conf_txt = f"{float(conf):.2f}" if isinstance(conf, (int, float)) else ""
-                                    st.write(f"- `{c}` {ttl}  {('(' + conf_txt + ')') if conf_txt else ''}  {why}".strip())
-                            within = rep.get("is_within_target", None)
-                            if within is True:
-                                st.success("Checker verdict: within the chosen target section.")
-                            elif within is False:
-                                st.error("Checker verdict: likely NOT within the chosen target section.")
-                            else:
-                                st.info("Checker verdict: target section not provided or unclear.")
-                            risks = rep.get("out_of_spec_risks", []) or []
-                            if risks:
-                                st.markdown("**Out-of-spec / quality risks:**")
-                                for rsk in risks[:8]:
-                                    st.write(f"- {rsk}")
-                            sugg = rep.get("suggestions", []) or []
-                            if sugg:
-                                st.markdown("**Suggested improvements:**")
-                                for sgg in sugg[:8]:
-                                    st.write(f"- {sgg}")
-
-                    st.write("### ✅ Vet and edit the draft (Markdown + LaTeX supported)")
-                    ed1, ed2 = st.columns([2, 1])
-                    with ed1:
-                        d_assignment = st.text_input("Assignment name", value=d.get("assignment_name", "AI Practice"), key="draft_assignment")
-                        d_label = st.text_input("Question label", value=d.get("question_label", ""), key="draft_label")
-                        d_marks = st.number_input("Max marks", min_value=1, max_value=50, value=int(d.get("max_marks", 4)), step=1, key="draft_marks")
-                        d_tags_str = st.text_input("Tags (comma separated)", value=", ".join(d.get("tags", [])), key="draft_tags")
-
-                    with ed2:
-                        st.caption("Mark scheme is confidential. Students never see it.")
-                        approve_clicked = st.button("Approve & Save to bank", type="primary", use_container_width=True, key="approve_save")
-                        st.caption("Tip: use Markdown and LaTeX ($...$) freely.")
-
-                    d_qtext = st.text_area("Question text (student will see this)", value=d.get("question_text", ""), height=180, key="draft_qtext")
-                    d_mstext = st.text_area("Mark scheme (teacher-only)", value=d.get("markscheme_text", ""), height=220, key="draft_mstext")
-
-                    p1, p2 = st.columns(2)
-                    with p1:
-                        render_md_box("Preview: Question (student view)", d_qtext, empty_text="No question text.")
-                    with p2:
-                        render_md_box("Preview: Mark scheme (teacher only)", d_mstext, empty_text="No mark scheme.")
-
-                    if approve_clicked:
-                        if not d_assignment.strip() or not d_label.strip():
-                            st.error("Assignment name and Question label cannot be blank.")
-                        elif not d_qtext.strip() or not d_mstext.strip():
-                            st.error("Question text and mark scheme cannot be blank.")
-                        else:
-                            combined = d_qtext + "\n" + d_mstext
-                            if re.search(r"\\mu_0|\bμ0\b|\\epsilon_0|\bε0\b|B\s*=\s*\\mu_0\s*n\s*I", combined, flags=re.IGNORECASE):
-                                st.error("This draft contains non-GCSE content (e.g. μ0/ε0 or B=μ0 n I). Please edit it out before saving.")
-                                st.stop()
-
-                            tags = [t.strip() for t in (d_tags_str or "").split(",") if t.strip()]
-                            ok = insert_question_bank_row(
-                                source="ai_generated",
-                                created_by="teacher",
-                                assignment_name=d_assignment.strip(),
-                                question_label=d_label.strip(),
-                                max_marks=int(d_marks),
-                                tags=tags,
-                                question_text=d_qtext.strip(),
-                                markscheme_text=d_mstext.strip(),
-                                question_image_path=None,
-                                markscheme_image_path=None,
+                            draft_raw = _run_ai_with_progress(
+                                task_fn=task_generate,
+                                ctx={"teacher": True, "mode": "single_question"},
+                                typical_range="5-12 seconds",
+                                est_seconds=10.0
                             )
-                            if ok:
-                                st.session_state["ai_draft"] = None
-                                st.success("Approved and saved. Students can now access this under AI Practice.")
+
+                            if not isinstance(draft_raw, dict):
+                                st.error("AI did not return a valid draft. Please try again.")
                             else:
-                                st.error("Failed to save to database. Check errors below.")
+                                qtxt = str(draft_raw.get("question_text", "") or "").strip()
+                                mstxt = str(draft_raw.get("markscheme_text", "") or "").strip()
+                                mm = clamp_int(draft_raw.get("max_marks", int(marks_req)), 1, 50, default=int(marks_req))
+                                tags = draft_raw.get("tags", [])
+                                warnings = draft_raw.get("warnings", [])
+                                if not isinstance(tags, list):
+                                    tags = []
+                                if not isinstance(warnings, list):
+                                    warnings = []
+
+                                if not qtxt or not mstxt:
+                                    st.error("AI did not return a valid draft. Please try again.")
+                                else:
+                                    token = pysecrets.token_hex(3)
+                                    default_label = f"AI-{slugify(topic_text)[:24]}-{token}"
+
+                                    st.session_state["ai_draft"] = {
+                                        "assignment_name": (assignment_name_ai or "").strip() or "AI Practice",
+                                        "question_label": default_label,
+                                        "max_marks": int(mm),
+                                        "tags": [str(t).strip() for t in tags if str(t).strip()][:10],
+                                        "question_text": qtxt,
+                                        "markscheme_text": mstxt,
+                                        "warnings": warnings[:10],
+                                    }
+                                    st.success("Draft generated. Please vet and edit below, then approve to save.")
+
+                    if st.session_state.get("ai_draft"):
+                        d = st.session_state["ai_draft"]
+
+                        if d.get("warnings"):
+                            st.warning("AI draft warnings (auto-check):\n\n" + "\n".join([f"- {w}" for w in d["warnings"]]))
+                        st.write("### ✅ Vet and edit the draft (Markdown + LaTeX supported)")
+                        ed1, ed2 = st.columns([2, 1])
+                        with ed1:
+                            d_assignment = st.text_input("Assignment name", value=d.get("assignment_name", "AI Practice"), key="draft_assignment")
+                            d_label = st.text_input("Question label", value=d.get("question_label", ""), key="draft_label")
+                            d_marks = st.number_input("Max marks", min_value=1, max_value=50, value=int(d.get("max_marks", 4)), step=1, key="draft_marks")
+                            d_tags_str = st.text_input("Tags (comma separated)", value=", ".join(d.get("tags", [])), key="draft_tags")
+
+                        with ed2:
+                            st.caption("Mark scheme is confidential. Students never see it.")
+                            approve_clicked = st.button("Approve & Save to bank", type="primary", use_container_width=True, key="approve_save")
+                            st.caption("Tip: use Markdown and LaTeX ($...$) freely.")
+
+                        d_qtext = st.text_area("Question text (student will see this)", value=d.get("question_text", ""), height=180, key="draft_qtext")
+                        d_mstext = st.text_area("Mark scheme (teacher-only)", value=d.get("markscheme_text", ""), height=220, key="draft_mstext")
+
+                        p1, p2 = st.columns(2)
+                        with p1:
+                            render_md_box("Preview: Question (student view)", d_qtext, empty_text="No question text.")
+                        with p2:
+                            render_md_box("Preview: Mark scheme (teacher only)", d_mstext, empty_text="No mark scheme.")
+
+                        if approve_clicked:
+                            if not d_assignment.strip() or not d_label.strip():
+                                st.error("Assignment name and Question label cannot be blank.")
+                            elif not d_qtext.strip() or not d_mstext.strip():
+                                st.error("Question text and mark scheme cannot be blank.")
+                            else:
+                                combined = d_qtext + "\n" + d_mstext
+                                if re.search(r"\\mu_0|\bμ0\b|\\epsilon_0|\bε0\b|B\s*=\s*\\mu_0\s*n\s*I", combined, flags=re.IGNORECASE):
+                                    st.error("This draft contains non-GCSE content (e.g. μ0/ε0 or B=μ0 n I). Please edit it out before saving.")
+                                    st.stop()
+
+                                tags = [t.strip() for t in (d_tags_str or "").split(",") if t.strip()]
+                                ok = insert_question_bank_row(
+                                    source="ai_generated",
+                                    created_by="teacher",
+                                    assignment_name=d_assignment.strip(),
+                                    question_label=d_label.strip(),
+                                    max_marks=int(d_marks),
+                                    tags=tags,
+                                    question_text=d_qtext.strip(),
+                                    markscheme_text=d_mstext.strip(),
+                                    question_image_path=None,
+                                    markscheme_image_path=None,
+                                    question_type="single",
+                                    journey_json=None,
+                                )
+                                if ok:
+                                    st.session_state["ai_draft"] = None
+                                    st.success("Approved and saved. Students can now access this under AI Practice.")
+                                else:
+                                    st.error("Failed to save to database. Check errors below.")
+
+                else:
+                    st.caption("Generate a step-by-step Topic Journey (one saved object). You must vet and edit before saving.")
+
+                    jc1, jc2 = st.columns([2, 1])
+                    with jc1:
+                        j_topic = st.text_input(
+                            "Topic in plain English",
+                            placeholder="e.g. Resistance and I-V characteristics (including filament lamp)",
+                            key="jour_topic"
+                        )
+                        j_duration = st.selectbox("Journey length", [10, 20, 30], index=1, key="jour_duration")
+                        st.caption(f"Will generate {DURATION_TO_STEPS.get(int(j_duration), 8)} steps.")
+                        e1, e2, e3, e4 = st.columns(4)
+                        with e1:
+                            emph_calc = st.slider("Calculation", 0, 3, 2, key="jour_emph_calc")
+                        with e2:
+                            emph_expl = st.slider("Explanation", 0, 3, 2, key="jour_emph_expl")
+                        with e3:
+                            emph_graph = st.slider("Graph", 0, 3, 1, key="jour_emph_graph")
+                        with e4:
+                            emph_prac = st.slider("Practical", 0, 3, 1, key="jour_emph_prac")
+
+                        j_assignment = st.text_input("Assignment name for saving", value="Topic Journey", key="jour_assignment")
+                        j_tags = st.text_input("Tags (comma separated)", value="", key="jour_tags")
+
+                    with jc2:
+                        gen_j = st.button("Generate journey draft", type="primary", use_container_width=True, disabled=not AI_READY, key="jour_gen_btn")
+                        if st.button("Clear journey draft", use_container_width=True, key="jour_clear_btn"):
+                            st.session_state["journey_draft"] = None
+                            st.rerun()
+
+                    if gen_j:
+                        if not (j_topic or "").strip():
+                            st.warning("Please enter a topic first.")
+                        else:
+                            emph = {"calculation": emph_calc, "explanation": emph_expl, "graph": emph_graph, "practical": emph_prac}
+
+                            def task_journey():
+                                return generate_topic_journey_with_ai(
+                                    topic_plain_english=j_topic.strip(),
+                                    duration_minutes=int(j_duration),
+                                    emphasis=emph,
+                                )
+
+                            data = _run_ai_with_progress(
+                                task_fn=task_journey,
+                                ctx={"teacher": True, "mode": "topic_journey"},
+                                typical_range="8-20 seconds",
+                                est_seconds=16.0
+                            )
+
+                            if not isinstance(data, dict) or not data.get("steps"):
+                                st.error("AI did not return a valid journey. Please try again.")
+                            else:
+                                token = pysecrets.token_hex(3)
+                                default_label = f"JOURNEY-{slugify(j_topic)[:24]}-{token}"
+                                st.session_state["journey_draft"] = {
+                                    "assignment_name": (j_assignment or "").strip() or "Topic Journey",
+                                    "question_label": default_label,
+                                    "tags": [t.strip() for t in (j_tags or "").split(",") if t.strip()],
+                                    "journey": data,
+                                }
+                                st.success("Journey draft generated. Vet/edit below, then save as one assignment.")
+
+                    if st.session_state.get("journey_draft"):
+                        d = st.session_state["journey_draft"]
+                        journey = d.get("journey", {}) if isinstance(d, dict) else {}
+                        steps = journey.get("steps", []) if isinstance(journey, dict) else []
+
+                        if journey.get("warnings"):
+                            st.warning("Journey draft warnings:\n\n" + "\n".join([f"- {w}" for w in journey.get("warnings", [])]))
+                        st.write("### ✅ Vet and edit the journey")
+                        hd1, hd2 = st.columns([2, 1])
+                        with hd1:
+                            d_assignment = st.text_input("Assignment name", value=d.get("assignment_name", "Topic Journey"), key="jour_draft_assignment")
+                            d_label = st.text_input("Journey label", value=d.get("question_label", ""), key="jour_draft_label")
+                            d_tags_str = st.text_input("Tags (comma separated)", value=", ".join(d.get("tags", [])), key="jour_draft_tags")
+
+                        with hd2:
+                            save_j = st.button("Save Topic Journey to bank", type="primary", use_container_width=True, key="jour_save_btn")
+                            st.caption("Saved as a single Question Bank entry (type=journey).")
+
+                        plan_md = st.text_area("Journey plan (Markdown)", value=journey.get("plan_markdown", ""), height=140, key="jour_plan_md")
+                        render_md_box("Preview: Journey plan", plan_md, empty_text="No plan.")
+
+                        # Optional teacher-only spec alignment preview
+                        with st.expander("Show spec alignment (teacher only)", expanded=False):
+                            spec_align = journey.get("spec_alignment", [])
+                            if isinstance(spec_align, list) and spec_align:
+                                for sref in spec_align[:20]:
+                                    st.markdown(normalize_markdown_math(f"- {sref}"))
+                            else:
+                                st.caption("No spec alignment provided.")
+
+                        st.write("### Steps")
+                        if not isinstance(steps, list) or not steps:
+                            st.error("No steps found in journey JSON.")
+                        else:
+                            total_marks = 0
+                            edited_steps = []
+                            for i, stp in enumerate(steps):
+                                stp = stp if isinstance(stp, dict) else {}
+                                with st.expander(f"Step {i+1}: {stp.get('objective','')[:80]}", expanded=(i == 0)):
+                                    obj = st.text_input("Objective", value=str(stp.get("objective", "") or ""), key=f"jour_step_obj_{i}")
+                                    mm = st.number_input("Max marks", min_value=1, max_value=12, value=int(stp.get("max_marks", 1) or 1), step=1, key=f"jour_step_mm_{i}")
+                                    qtxt = st.text_area("Question text (Markdown + LaTeX)", value=str(stp.get("question_text", "") or ""), height=160, key=f"jour_step_q_{i}")
+                                    mstxt = st.text_area("Mark scheme (ends with TOTAL = <max_marks>)", value=str(stp.get("markscheme_text", "") or ""), height=200, key=f"jour_step_ms_{i}")
+                                    miscon = st.text_area("Common misconceptions (one per line)", value="\n".join([str(x) for x in (stp.get("misconceptions", []) or [])]), height=90, key=f"jour_step_mis_{i}")
+
+                                    render_md_box("Preview: Question", qtxt, empty_text="No question text.")
+                                    render_md_box("Preview: Mark scheme", mstxt, empty_text="No mark scheme.")
+
+                                    total_marks += int(mm)
+                                    edited_steps.append({
+                                        "objective": str(obj or "").strip(),
+                                        "question_text": str(qtxt or "").strip(),
+                                        "markscheme_text": str(mstxt or "").strip(),
+                                        "max_marks": int(mm),
+                                        "misconceptions": [x.strip() for x in (miscon or "").split("\n") if x.strip()][:6],
+                                        "spec_refs": [str(x).strip() for x in (stp.get("spec_refs", []) or []) if str(x).strip()][:6],
+                                    })
+
+                            if save_j:
+                                if not d_assignment.strip() or not d_label.strip():
+                                    st.error("Assignment name and Journey label cannot be blank.")
+                                else:
+                                    # Validate TOTAL lines
+                                    bad_total = []
+                                    for i, stp in enumerate(edited_steps):
+                                        if f"TOTAL = {int(stp['max_marks'])}" not in (stp.get("markscheme_text") or ""):
+                                            bad_total.append(i + 1)
+                                    if bad_total:
+                                        st.error("These steps are missing the required TOTAL line: " + ", ".join([str(x) for x in bad_total]))
+                                        st.stop()
+
+                                    tags = [t.strip() for t in (d_tags_str or "").split(",") if t.strip()]
+                                    tags = tags[:20]
+
+                                    journey_json = {
+                                        "topic": str(journey.get("topic", "") or j_topic).strip(),
+                                        "duration_minutes": int(journey.get("duration_minutes", j_duration) or j_duration),
+                                        "checkpoint_every": int(journey.get("checkpoint_every", JOURNEY_CHECKPOINT_EVERY) or JOURNEY_CHECKPOINT_EVERY),
+                                        "plan_markdown": str(plan_md or "").strip(),
+                                        "spec_alignment": [str(x).strip() for x in (journey.get("spec_alignment", []) or []) if str(x).strip()][:20],
+                                        "steps": edited_steps,
+                                    }
+
+                                    ok = insert_question_bank_row(
+                                        source="ai_generated",
+                                        created_by="teacher",
+                                        assignment_name=d_assignment.strip(),
+                                        question_label=d_label.strip(),
+                                        max_marks=int(total_marks) if total_marks > 0 else 1,
+                                        tags=tags,
+                                        question_text=str(plan_md or "").strip(),
+                                        markscheme_text="",
+                                        question_image_path=None,
+                                        markscheme_image_path=None,
+                                        question_type="journey",
+                                        journey_json=journey_json,
+                                    )
+                                    if ok:
+                                        st.session_state["journey_draft"] = None
+                                        st.success("Topic Journey saved. Students will see it as a single assignment and progress step-by-step.")
+                                    else:
+                                        st.error("Failed to save journey to database. Check errors below.")
 
                 st.divider()
 
