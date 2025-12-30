@@ -1,1 +1,181 @@
-
+{
+  "metadata": {
+    "subject": "physics",
+    "exam_board": "AQA",
+    "spec_code": "8463",
+    "tier": "Higher",
+    "version": "v1"
+  },
+  "topics": [
+    {
+      "id": "energy-stores-and-transfers",
+      "name": "Energy stores and transfers",
+      "track_ok": "both"
+    },
+    {
+      "id": "work-done-and-power",
+      "name": "Work done and power",
+      "track_ok": "both"
+    },
+    {
+      "id": "efficiency",
+      "name": "Efficiency",
+      "track_ok": "both"
+    },
+    {
+      "id": "kinetic-energy-and-momentum",
+      "name": "Kinetic energy and momentum",
+      "track_ok": "both"
+    },
+    {
+      "id": "heating-and-thermal-energy",
+      "name": "Heating and thermal energy",
+      "track_ok": "both"
+    },
+    {
+      "id": "temperature-vs-energy",
+      "name": "Temperature vs energy",
+      "track_ok": "both"
+    },
+    {
+      "id": "specific-heat-capacity",
+      "name": "Specific heat capacity",
+      "track_ok": "both"
+    },
+    {
+      "id": "specific-latent-heat",
+      "name": "Specific latent heat",
+      "track_ok": "both"
+    },
+    {
+      "id": "gas-pressure-and-temperature",
+      "name": "Gas pressure and temperature",
+      "track_ok": "both"
+    },
+    {
+      "id": "density",
+      "name": "Density",
+      "track_ok": "both"
+    },
+    {
+      "id": "changes-of-state",
+      "name": "Changes of state",
+      "track_ok": "both"
+    },
+    {
+      "id": "electric-current-potential-difference-resistance",
+      "name": "Electric current, potential difference, resistance",
+      "track_ok": "both"
+    },
+    {
+      "id": "series-and-parallel-circuits",
+      "name": "Series and parallel circuits",
+      "track_ok": "both"
+    },
+    {
+      "id": "i-v-characteristics",
+      "name": "I-V characteristics",
+      "track_ok": "both"
+    },
+    {
+      "id": "resistors-including-thermistors-and-ldrs",
+      "name": "Resistors (including thermistors and LDRs)",
+      "track_ok": "both"
+    },
+    {
+      "id": "power-in-circuits",
+      "name": "Power in circuits",
+      "track_ok": "both"
+    },
+    {
+      "id": "domestic-electricity-and-safety",
+      "name": "Domestic electricity and safety",
+      "track_ok": "both"
+    },
+    {
+      "id": "static-electricity",
+      "name": "Static electricity",
+      "track_ok": "both"
+    },
+    {
+      "id": "particle-model-and-internal-energy",
+      "name": "Particle model and internal energy",
+      "track_ok": "both"
+    },
+    {
+      "id": "forces-and-motion-newton-s-laws",
+      "name": "Forces and motion (Newton's laws)",
+      "track_ok": "both"
+    },
+    {
+      "id": "resultant-force-and-acceleration",
+      "name": "Resultant force and acceleration",
+      "track_ok": "both"
+    },
+    {
+      "id": "stopping-distance",
+      "name": "Stopping distance",
+      "track_ok": "both"
+    },
+    {
+      "id": "moments-levers-and-gears",
+      "name": "Moments, levers and gears",
+      "track_ok": "both"
+    },
+    {
+      "id": "pressure-in-fluids",
+      "name": "Pressure in fluids",
+      "track_ok": "both"
+    },
+    {
+      "id": "waves-properties-and-equations",
+      "name": "Waves (properties and equations)",
+      "track_ok": "both"
+    },
+    {
+      "id": "reflection-and-refraction",
+      "name": "Reflection and refraction",
+      "track_ok": "both"
+    },
+    {
+      "id": "lenses-and-ray-diagrams",
+      "name": "Lenses and ray diagrams",
+      "track_ok": "both"
+    },
+    {
+      "id": "the-electromagnetic-spectrum",
+      "name": "The electromagnetic spectrum",
+      "track_ok": "both"
+    },
+    {
+      "id": "radioactivity-basics",
+      "name": "Radioactivity basics",
+      "track_ok": "both"
+    },
+    {
+      "id": "half-life-and-decay",
+      "name": "Half-life and decay",
+      "track_ok": "both"
+    },
+    {
+      "id": "nuclear-fission-and-fusion",
+      "name": "Nuclear fission and fusion",
+      "track_ok": "both"
+    },
+    {
+      "id": "magnetism-and-electromagnets",
+      "name": "Magnetism and electromagnets",
+      "track_ok": "both"
+    },
+    {
+      "id": "motor-effect",
+      "name": "Motor effect",
+      "track_ok": "both"
+    },
+    {
+      "id": "generators-and-transformers",
+      "name": "Generators and transformers",
+      "track_ok": "both"
+    }
+  ]
+}

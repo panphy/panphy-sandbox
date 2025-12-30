@@ -1,0 +1,19 @@
+{
+  "subject": "physics",
+  "display_name": "AQA GCSE Physics (Higher)",
+  "exam_board": "AQA",
+  "spec_code": "8463",
+  "tier": "Higher",
+  "question_types": [
+    "Calculation",
+    "Explanation",
+    "Practical/Methods",
+    "Graph/Analysis",
+    "Mixed"
+  ],
+  "difficulties": [
+    "Easy",
+    "Medium",
+    "Hard"
+  ]
+}
