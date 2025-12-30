@@ -247,7 +247,9 @@ _ss_init("bank_table_ready", False)
 _ss_init("is_teacher", False)
 
 # Canvas robustness cache
-_ss_init("last_canvas_image_data", None)
+_ss_init("last_canvas_image_data", None)  # legacy
+_ss_init("last_canvas_image_data_single", None)
+_ss_init("last_canvas_image_data_journey", None)
 
 # Question selection cache
 _ss_init("selected_qid", None)
@@ -1912,7 +1914,9 @@ if nav == "🧑‍🎓 Student":
                                 # Reset attempt state
                                 st.session_state["feedback"] = None
                                 st.session_state["canvas_key"] += 1
-                                st.session_state["last_canvas_image_data"] = None
+                                st.session_state["last_canvas_image_data"] = None  # legacy
+                                st.session_state["last_canvas_image_data_single"] = None
+                                st.session_state["last_canvas_image_data_journey"] = None
 
                                 # Reset Topic Journey state (if applicable)
                                 st.session_state["journey_step_index"] = 0
@@ -1983,11 +1987,17 @@ if nav == "🧑‍🎓 Student":
                     st.warning("This question has no question text or image.")
             st.caption(f"Max Marks: {max_marks}")
 
+            
             st.write("")
-            tab_type, tab_write = st.tabs(["⌨️ Type Answer", "✍️ Write Answer"])
+            mode_single = st.radio(
+                "Answer mode",
+                ["⌨️ Type answer", "✍️ Write answer"],
+                horizontal=True,
+                label_visibility="collapsed",
+                key="answer_mode_single",
+            )
 
-            # ---- typed answer (single) ----
-            with tab_type:
+            if str(mode_single).startswith("⌨️"):
                 st.markdown("**Answer (typed)**")
                 answer_single = st.text_area(
                     "Type your working:",
@@ -2004,7 +2014,7 @@ if nav == "🧑‍🎓 Student":
                 ):
                     sid = _effective_student_id(student_id)
 
-                    if not answer_single.strip():
+                    if not str(answer_single).strip():
                         st.toast("Please type an answer first.", icon="⚠️")
                     else:
                         try:
@@ -2048,9 +2058,7 @@ if nav == "🧑‍🎓 Student":
                                     mode="text",
                                     question_bank_id=qid,
                                 )
-
-            # ---- writing answer (single) ----
-            with tab_write:
+            else:
                 st.markdown("**Answer (write/draw)**")
                 tool_row = st.columns([2, 1])
                 with tool_row[0]:
@@ -2065,8 +2073,8 @@ if nav == "🧑‍🎓 Student":
 
                 if clear_clicked:
                     st.session_state["feedback"] = None
-                    st.session_state["last_canvas_image_data"] = None
-                    st.session_state["canvas_key"] += 1
+                    st.session_state["last_canvas_image_data_single"] = None
+                    st.session_state["canvas_key"] = int(st.session_state.get("canvas_key", 0) or 0) + 1
                     st.rerun()
 
                 stroke_width = 2 if tool == "Pen" else 30
@@ -2079,14 +2087,14 @@ if nav == "🧑‍🎓 Student":
                     height=400,
                     width=600,
                     drawing_mode="freedraw",
-                    key=f"canvas_{st.session_state['canvas_key']}",
+                    key=f"canvas_single_{st.session_state['canvas_key']}",
                     display_toolbar=False,
                     update_streamlit=True,
                 )
 
                 if canvas_result is not None and getattr(canvas_result, "image_data", None) is not None:
                     if canvas_has_ink(canvas_result.image_data):
-                        st.session_state["last_canvas_image_data"] = canvas_result.image_data
+                        st.session_state["last_canvas_image_data_single"] = canvas_result.image_data
 
                 submitted_writing = st.button(
                     "Submit Writing",
@@ -2102,7 +2110,7 @@ if nav == "🧑‍🎓 Student":
                     if canvas_result is not None and getattr(canvas_result, "image_data", None) is not None:
                         img_data = canvas_result.image_data
                     if img_data is None:
-                        img_data = st.session_state.get("last_canvas_image_data")
+                        img_data = st.session_state.get("last_canvas_image_data_single")
 
                     if img_data is None or (not canvas_has_ink(img_data)):
                         st.toast("Canvas is blank. Write your answer first, then press Submit.", icon="⚠️")
@@ -2163,6 +2171,7 @@ if nav == "🧑‍🎓 Student":
                             mode="writing",
                             question_bank_id=qid,
                         )
+
 
         else:
             # -------------------------
@@ -2242,11 +2251,17 @@ if nav == "🧑‍🎓 Student":
                         notes[str(idx)] = md
                         st.session_state["journey_checkpoint_notes"] = notes
 
+                    
                     st.write("")
-                    tab_type, tab_write = st.tabs(["⌨️ Type Answer", "✍️ Write Answer"])
+                    mode_journey = st.radio(
+                        "Answer mode",
+                        ["⌨️ Type answer", "✍️ Write answer"],
+                        horizontal=True,
+                        label_visibility="collapsed",
+                        key="answer_mode_journey",
+                    )
 
-                    # ---- typed answer (journey) ----
-                    with tab_type:
+                    if str(mode_journey).startswith("⌨️"):
                         st.markdown("**Answer (typed)**")
                         answer_journey = st.text_area(
                             "Type your working:",
@@ -2263,7 +2278,7 @@ if nav == "🧑‍🎓 Student":
                         ):
                             sid = _effective_student_id(student_id)
 
-                            if not answer_journey.strip():
+                            if not str(answer_journey).strip():
                                 st.toast("Please type an answer first.", icon="⚠️")
                             else:
                                 try:
@@ -2313,9 +2328,7 @@ if nav == "🧑‍🎓 Student":
                                             question_bank_id=qid,
                                             step_index=step_i,
                                         )
-
-                    # ---- writing answer (journey) ----
-                    with tab_write:
+                    else:
                         st.markdown("**Answer (write/draw)**")
                         tool_row = st.columns([2, 1])
                         with tool_row[0]:
@@ -2330,8 +2343,8 @@ if nav == "🧑‍🎓 Student":
 
                         if clear_clicked:
                             st.session_state["feedback"] = None
-                            st.session_state["last_canvas_image_data"] = None
-                            st.session_state["canvas_key"] += 1
+                            st.session_state["last_canvas_image_data_journey"] = None
+                            st.session_state["canvas_key"] = int(st.session_state.get("canvas_key", 0) or 0) + 1
                             st.rerun()
 
                         stroke_width = 2 if tool == "Pen" else 30
@@ -2344,14 +2357,14 @@ if nav == "🧑‍🎓 Student":
                             height=400,
                             width=600,
                             drawing_mode="freedraw",
-                            key=f"canvas_{st.session_state['canvas_key']}",
+                            key=f"canvas_journey_{st.session_state['canvas_key']}",
                             display_toolbar=False,
                             update_streamlit=True,
                         )
 
                         if canvas_result is not None and getattr(canvas_result, "image_data", None) is not None:
                             if canvas_has_ink(canvas_result.image_data):
-                                st.session_state["last_canvas_image_data"] = canvas_result.image_data
+                                st.session_state["last_canvas_image_data_journey"] = canvas_result.image_data
 
                         submitted_writing = st.button(
                             "Submit Writing",
@@ -2367,7 +2380,7 @@ if nav == "🧑‍🎓 Student":
                             if canvas_result is not None and getattr(canvas_result, "image_data", None) is not None:
                                 img_data = canvas_result.image_data
                             if img_data is None:
-                                img_data = st.session_state.get("last_canvas_image_data")
+                                img_data = st.session_state.get("last_canvas_image_data_journey")
 
                             if img_data is None or (not canvas_has_ink(img_data)):
                                 st.toast("Canvas is blank. Write your answer first, then press Submit.", icon="⚠️")
@@ -2435,6 +2448,7 @@ if nav == "🧑‍🎓 Student":
                                     step_index=step_i,
                                 )
 
+
     # -------------------------
     # RIGHT: Feedback
     # -------------------------
@@ -2461,7 +2475,8 @@ if nav == "🧑‍🎓 Student":
                     total_steps = len(steps) if isinstance(steps, list) else 0
 
                     def _reset_answer_inputs_for_step():
-                        st.session_state["last_canvas_image_data"] = None
+                        st.session_state["last_canvas_image_data"] = None  # legacy
+                        st.session_state["last_canvas_image_data_journey"] = None
                         st.session_state["canvas_key"] = int(st.session_state.get("canvas_key", 0) or 0) + 1
                         st.session_state["student_answer_text_journey"] = ""
 
@@ -2494,7 +2509,8 @@ if nav == "🧑‍🎓 Student":
                 else:
                     def _new_attempt_cb():
                         st.session_state["feedback"] = None
-                        st.session_state["last_canvas_image_data"] = None
+                        st.session_state["last_canvas_image_data"] = None  # legacy
+                        st.session_state["last_canvas_image_data_single"] = None
                         st.session_state["canvas_key"] = int(st.session_state.get("canvas_key", 0) or 0) + 1
                         st.session_state["student_answer_text_single"] = ""
 
