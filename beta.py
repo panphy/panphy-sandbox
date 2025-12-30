@@ -1983,15 +1983,15 @@ _persist_track_to_browser(st.session_state.get("track", TRACK_DEFAULT))
 with st.sidebar:
     if st.session_state.get("track", TRACK_DEFAULT) == "combined":
         if hasattr(st, "badge"):
-            st.badge("COMBINED selected", color="orange")
+            st.badge("COMBINED", color="orange")
         else:
             st.markdown(":orange-badge[COMBINED]")
     else:
         if hasattr(st, "badge"):
-            st.badge("SEPARATE selected", color="primary")
+            st.badge("SEPARATE", color="primary")
         else:
             st.markdown(":blue-badge[SEPARATE]")
-    st.caption("A badge is shown to indicate if Combined or Separate Physics is selected.")
+    st.caption("This badge show whether Combined or Separate Physics is selected.")
 
 header_left, header_mid, header_right = st.columns([3, 2, 1])
 
@@ -2009,9 +2009,9 @@ def _render_badge(label: str, *, color: str, icon: str | None = None):
 
 with header_right:
     if _track == "combined":
-        _render_badge("COMBINED selected", color="orange", icon=":material/merge_type:")
+        _render_badge("COMBINED", color="orange", icon=":material/merge_type:")
     else:
-        _render_badge("SEPARATE selected", color="primary", icon=":material/call_split:")
+        _render_badge("SEPARATE", color="primary", icon=":material/call_split:")
 
 with header_left:
 
