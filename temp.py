@@ -193,13 +193,81 @@ def load_spec_pack(spec_path: str) -> Dict[str, Any]:
         raise FileNotFoundError(f"Spec pack not found at: {spec_path}")
     return json.loads(p.read_text(encoding="utf-8"))
 
+def _looks_like_spec_code(code: str) -> bool:
+    """Return True if *code* looks like an AQA-style numeric spec code (e.g. 4.1.2.3)."""
+    s = str(code or "").strip()
+    return bool(re.fullmatch(r"\d+(?:\.\d+)*", s))
+
+def normalized_content_map(spec_pack: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, List[str]]]:
+    """Return a normalized {code: {content: [str, ...]}} mapping from various extractor schemas."""
+    if not isinstance(spec_pack, dict):
+        return {}
+
+    # Common variants across different extractors
+    candidate_keys = [
+        "content_map",
+        "topic_code_to_content",
+        "code_to_content",
+        "content_by_code",
+        "topic_code_to_lines",
+        "topic_code_to_bullets",
+    ]
+
+    raw = None
+    for k in candidate_keys:
+        v = spec_pack.get(k)
+        if isinstance(v, dict) and v:
+            raw = v
+            break
+
+    if not isinstance(raw, dict):
+        return {}
+
+    out: Dict[str, Dict[str, List[str]]] = {}
+    for code, entry in raw.items():
+        code_s = str(code).strip()
+        if not _looks_like_spec_code(code_s):
+            continue
+
+        content = None
+        if isinstance(entry, dict):
+            content = (
+                entry.get("content")
+                or entry.get("lines")
+                or entry.get("bullets")
+                or entry.get("text")
+                or entry.get("content_lines")
+            )
+        else:
+            content = entry
+
+        lines: List[str] = []
+        if content is None:
+            lines = []
+        elif isinstance(content, str):
+            lines = [ln.strip().lstrip("-•\t ") for ln in content.splitlines() if ln.strip()]
+        elif isinstance(content, list):
+            for x in content:
+                sx = str(x).strip()
+                if sx:
+                    lines.append(sx)
+        else:
+            sx = str(content).strip()
+            if sx:
+                lines = [sx]
+
+        out[code_s] = {"content": lines}
+
+    return out
+
 def build_spec_indexes(spec_pack: Optional[Dict[str, Any]]) -> Tuple[Dict[str, str], Dict[str, bool]]:
     """Build lookup tables from a spec pack.
 
-    Be tolerant of different extractor outputs:
-    - allowed_topics as List[Dict{code,title,ht_only}]
-    - allowed_topics as Dict[code -> title|{title,ht_only}]
-    - allowed_topics as List[str] (we try to parse a leading code)
+    This app supports multiple extractor JSON schemas. We try (in order):
+
+    1) allowed_topics: List[Dict{code,title,ht_only}] OR Dict[code -> title|{title,ht_only}]
+    2) topic_code_to_title / code_to_title: Dict[code -> title|{title,...}]
+    3) topic_tree: nested tree of nodes containing code/title + children
     """
     code_to_title: Dict[str, str] = {}
     code_to_ht: Dict[str, bool] = {}
@@ -207,11 +275,26 @@ def build_spec_indexes(spec_pack: Optional[Dict[str, Any]]) -> Tuple[Dict[str, s
     if not isinstance(spec_pack, dict):
         return code_to_title, code_to_ht
 
-    topics = spec_pack.get("allowed_topics") or []
+    # Helper to add a code safely
+    def _add(code: str, title: str = "", ht_only: bool = False):
+        c = str(code or "").strip()
+        if not _looks_like_spec_code(c):
+            return
+        t = str(title or "").strip()
+        if c not in code_to_title:
+            code_to_title[c] = t
+        elif t and not code_to_title[c]:
+            code_to_title[c] = t
+        if ht_only:
+            code_to_ht[c] = True
+        else:
+            code_to_ht.setdefault(c, False)
+
+    # (A) allowed_topics (preferred if present and well-formed)
+    topics = spec_pack.get("allowed_topics")
     iterable: List[Any] = []
 
     if isinstance(topics, dict):
-        # {"4.1": "Energy"} or {"4.1": {"title":..., "ht_only":...}}
         for k, v in topics.items():
             if isinstance(v, dict):
                 d = {"code": k, **v}
@@ -220,37 +303,84 @@ def build_spec_indexes(spec_pack: Optional[Dict[str, Any]]) -> Tuple[Dict[str, s
             iterable.append(d)
     elif isinstance(topics, list):
         iterable = topics
-    else:
-        iterable = []
 
-    code_re = re.compile(r"^(\d+(?:\.\d+)*)")
+    if iterable:
+        code_re = re.compile(r"^(\d+(?:\.\d+)*)")
+        for t in iterable:
+            if isinstance(t, dict):
+                code = str(t.get("code", "")).strip()
+                title = str(t.get("title", "")).strip()
+                ht = bool(t.get("ht_only", False) or t.get("higher_only", False))
+                _add(code, title, ht)
+            elif isinstance(t, str):
+                s = t.strip()
+                m = code_re.match(s)
+                if not m:
+                    continue
+                code = m.group(1)
+                title = s[len(code):].lstrip(" :-–—\t")
+                _add(code, title, False)
 
-    for t in iterable:
-        if isinstance(t, dict):
-            code = str(t.get("code", "")).strip()
-            if not code:
+    # (B) direct mapping variants
+    if not code_to_title:
+        for key in ("topic_code_to_title", "code_to_title", "topic_titles", "topic_code_to_heading"):
+            m = spec_pack.get(key)
+            if not isinstance(m, dict) or not m:
                 continue
-            title = str(t.get("title", "")).strip()
-            ht = bool(t.get("ht_only", False))
-        elif isinstance(t, str):
-            s = t.strip()
-            m = code_re.match(s)
-            if not m:
-                continue
-            code = m.group(1)
-            title = s[len(code):].lstrip(" :-–—\t")
-            ht = False
-        else:
-            continue
+            for k, v in m.items():
+                if isinstance(v, dict):
+                    title = v.get("title") or v.get("heading") or v.get("name") or ""
+                    ht = bool(v.get("ht_only", False) or v.get("higher_only", False))
+                else:
+                    title = str(v)
+                    ht = False
+                _add(str(k), str(title), ht)
+            if code_to_title:
+                break
 
-        if not code:
-            continue
-        code_to_title[code] = title
-        code_to_ht[code] = ht
+    # (C) topic_tree traversal
+    if not code_to_title:
+        tree = spec_pack.get("topic_tree") or spec_pack.get("tree") or spec_pack.get("topics_tree")
+        def _walk(node: Any):
+            if isinstance(node, dict):
+                # Node-form
+                if "code" in node:
+                    title = node.get("title") or node.get("heading") or node.get("name") or ""
+                    ht = bool(node.get("ht_only", False) or node.get("higher_only", False))
+                    _add(str(node.get("code")), str(title), ht)
+                # Mapping-form (code -> child)
+                for k, v in node.items():
+                    if _looks_like_spec_code(str(k)):
+                        if isinstance(v, dict):
+                            title = v.get("title") or v.get("heading") or v.get("name") or ""
+                            ht = bool(v.get("ht_only", False) or v.get("higher_only", False))
+                            _add(str(k), str(title), ht)
+                            # Recurse children
+                            for ck in ("children", "subtopics", "sections", "subsections", "items", "nodes"):
+                                if ck in v:
+                                    _walk(v.get(ck))
+                        else:
+                            _add(str(k), str(v), False)
+                # Children arrays
+                for ck in ("children", "subtopics", "sections", "subsections", "items", "nodes"):
+                    if ck in node:
+                        _walk(node.get(ck))
+            elif isinstance(node, list):
+                for it in node:
+                    _walk(it)
+
+        _walk(tree)
+
+    # Global HT-only code list (optional)
+    ht_codes = spec_pack.get("ht_only_codes") or spec_pack.get("higher_only_codes") or []
+    if isinstance(ht_codes, list):
+        for c in ht_codes:
+            cs = str(c).strip()
+            if _looks_like_spec_code(cs):
+                code_to_ht[cs] = True
+                code_to_title.setdefault(cs, code_to_title.get(cs, ""))
 
     return code_to_title, code_to_ht
-
-
 def spec_path_for_code(code: str, code_to_title: Dict[str, str]) -> List[Tuple[str, str]]:
     """
     Build a breadcrumb path like [('4.5','Forces'),('4.5.2','Forces and their effects'),...]
@@ -271,17 +401,17 @@ def spec_path_for_code(code: str, code_to_title: Dict[str, str]) -> List[Tuple[s
 def spec_excerpt_for_code(spec_pack: Dict[str, Any], target_code: str, max_lines: int = 24) -> str:
     """
     Returns a compact text excerpt for the target code.
-    The HTML extractor often puts most wording at higher-level headings,
+
+    Many spec extractors store most wording at higher-level headings,
     so we fall back to the nearest ancestor that has non-empty content.
     """
-    content_map = spec_pack.get("content_map") or {}
+    content_map = normalized_content_map(spec_pack)
     code_to_title, _ = build_spec_indexes(spec_pack)
 
     def content_lines_for(code: str) -> List[str]:
         entry = content_map.get(code) or {}
         lines = entry.get("content") or []
-        # Normalize to list[str]
-        out = []
+        out: List[str] = []
         for x in lines:
             sx = str(x).strip()
             if sx:
@@ -290,17 +420,18 @@ def spec_excerpt_for_code(spec_pack: Dict[str, Any], target_code: str, max_lines
 
     # Walk up the hierarchy until we find content
     c = (target_code or "").strip()
-    candidates = []
+    candidates: List[str] = []
     if c:
         parts = c.split(".")
         for i in range(len(parts), 0, -1):
             candidates.append(".".join(parts[:i]))
+
     for cc in candidates:
-        lines = content_lines_for(cc)
-        if lines:
+        lines2 = content_lines_for(cc)
+        if lines2:
             title = code_to_title.get(cc, "")
             head = f"{cc} {title}".strip()
-            snippet = "\n".join(f"- {ln}" for ln in lines[:max_lines])
+            snippet = "\n".join(f"- {ln}" for ln in lines2[:max_lines])
             return f"{head}\n{snippet}".strip()
 
     # If no content found, return a breadcrumb list of sub-sections for anchoring
@@ -309,7 +440,6 @@ def spec_excerpt_for_code(spec_pack: Dict[str, Any], target_code: str, max_lines
         crumbs = " → ".join([f"{pc} {pt}".strip() for pc, pt in path])
         return f"{crumbs}\n- (No extracted wording for this sub-section in the current JSON; using titles as anchor.)"
     return "- (No spec excerpt available.)"
-
 def format_spec_option(code: str, title: str, ht_only: bool) -> str:
     s = f"{code} {title}".strip()
     if ht_only:
@@ -2442,7 +2572,7 @@ else:
                     )
 
                     # Quick spec pack quality indicator
-                    content_map = spec_pack.get("content_map") or {}
+                    content_map = normalized_content_map(spec_pack)
                     nonempty = 0
                     for _, v in content_map.items():
                         lines = (v or {}).get("content") or []
