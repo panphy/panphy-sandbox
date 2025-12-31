@@ -1,14 +1,8 @@
 {
   "meta": {
-    "subject": "AQA GCSE Physics (8463) Higher",
-    "notes": [
-      "This file is used as a guardrail so AI-generated questions follow AQA GCSE scope and AQA equation-sheet notation.",
-      "Equations are represented in LaTeX for prompt injection and for internal validation."
-    ],
-    "sources": [
-      "AQA GCSE Physics (8463) Equation Sheet (e.g., June 2024 insert): Ee = 1/2 k e^2 uses extension e (not x).",
-      "AQA GCSE Physics (8463) specification: red-shift is assessed qualitatively (no z calculation)."
-    ]
+    "source": "AQA GCSE Physics (8463) specification Appendix A: Physics equations",
+    "source_pdf": "https://cdn.sanity.io/files/p28bar15/green/e96b2cef624c0970b0f90d9678a438580aed0f65.pdf",
+    "notes": "Includes both the 'recall and apply' equations (1-23) and the Physics equation sheet 'select and apply' equations (1-12). HT indicates Higher Tier only."
   },
   "notation_rules": [
     "Springs: use extension symbol e (metres). Do not use x for extension in this app.",
@@ -18,68 +12,463 @@
   ],
   "key_equations": [
     {
-      "name": "Hooke’s law",
-      "latex": "$F = k e$"
+      "group": "recall_and_apply",
+      "number": 1,
+      "ht": false,
+      "word": "weight = mass × gravitational field strength g",
+      "latex": "W = m g"
     },
     {
-      "name": "Elastic potential energy",
-      "latex": "$E_e = \\frac{1}{2} k e^2$"
+      "group": "recall_and_apply",
+      "number": 2,
+      "ht": false,
+      "word": "work done = force × distance along the line of action of the force",
+      "latex": "W = F s"
     },
     {
-      "name": "Kinetic energy",
-      "latex": "$E_k = \\frac{1}{2} m v^2$"
+      "group": "recall_and_apply",
+      "number": 3,
+      "ht": false,
+      "word": "force applied to a spring = spring constant × extension",
+      "latex": "F = k e"
     },
     {
-      "name": "Gravitational potential energy",
-      "latex": "$E_p = m g h$"
+      "group": "recall_and_apply",
+      "number": 4,
+      "ht": false,
+      "word": "moment of a force = force × distance normal to direction of force",
+      "latex": "M = F d"
     },
     {
-      "name": "Work done",
-      "latex": "$W = F s$"
+      "group": "recall_and_apply",
+      "number": 5,
+      "ht": false,
+      "word": "pressure = force normal to a surface / area of that surface",
+      "latex": "p = \\frac{F}{A}"
     },
     {
-      "name": "Power",
-      "latex": "$P = \\frac{E}{t}$"
+      "group": "recall_and_apply",
+      "number": 6,
+      "ht": false,
+      "word": "distance travelled = speed × time",
+      "latex": "s = v t"
     },
     {
-      "name": "Momentum",
-      "latex": "$p = m v$"
+      "group": "recall_and_apply",
+      "number": 7,
+      "ht": false,
+      "word": "acceleration = change in velocity / time taken",
+      "latex": "a = \\frac{\\Delta v}{t}"
     },
     {
-      "name": "Force and momentum",
-      "latex": "$F = \\frac{\\Delta p}{\\Delta t}$"
+      "group": "recall_and_apply",
+      "number": 8,
+      "ht": false,
+      "word": "resultant force = mass × acceleration",
+      "latex": "F = m a"
     },
     {
-      "name": "Pressure",
-      "latex": "$p = \\frac{F}{A}$"
+      "group": "recall_and_apply",
+      "number": 9,
+      "ht": true,
+      "word": "momentum = mass × velocity",
+      "latex": "p = m v"
     },
     {
-      "name": "Density",
-      "latex": "$\\rho = \\frac{m}{V}$"
+      "group": "recall_and_apply",
+      "number": 10,
+      "ht": false,
+      "word": "kinetic energy = 0.5 × mass × speed^2",
+      "latex": "E_k = \\frac{1}{2} m v^2"
     },
     {
-      "name": "Charge",
-      "latex": "$Q = I t$"
+      "group": "recall_and_apply",
+      "number": 11,
+      "ht": false,
+      "word": "gravitational potential energy = mass × gravitational field strength g × height",
+      "latex": "E_p = m g h"
     },
     {
-      "name": "Ohm’s law",
-      "latex": "$V = I R$"
+      "group": "recall_and_apply",
+      "number": 12,
+      "ht": false,
+      "word": "power = energy transferred / time",
+      "latex": "P = \\frac{E}{t}"
     },
     {
-      "name": "Electrical power",
-      "latex": "$P = I V$"
+      "group": "recall_and_apply",
+      "number": 13,
+      "ht": false,
+      "word": "power = work done / time",
+      "latex": "P = \\frac{W}{t}"
     },
     {
-      "name": "Wave speed",
-      "latex": "$v = f \\lambda$"
+      "group": "recall_and_apply",
+      "number": 14,
+      "ht": false,
+      "word": "efficiency = useful output energy transfer / total input energy transfer",
+      "latex": "\\text{efficiency} = \\frac{\\text{useful output}}{\\text{total input}}"
     },
     {
-      "name": "Speed",
-      "latex": "$v = \\frac{s}{t}$"
+      "group": "recall_and_apply",
+      "number": 15,
+      "ht": false,
+      "word": "efficiency = useful power output / total power input",
+      "latex": "\\text{efficiency} = \\frac{\\text{useful power output}}{\\text{total power input}}"
     },
     {
-      "name": "Acceleration",
-      "latex": "$a = \\frac{\\Delta v}{\\Delta t}$"
+      "group": "recall_and_apply",
+      "number": 16,
+      "ht": false,
+      "word": "wave speed = frequency × wavelength",
+      "latex": "v = f \\lambda"
+    },
+    {
+      "group": "recall_and_apply",
+      "number": 17,
+      "ht": false,
+      "word": "charge flow = current × time",
+      "latex": "Q = I t"
+    },
+    {
+      "group": "recall_and_apply",
+      "number": 18,
+      "ht": false,
+      "word": "potential difference = current × resistance",
+      "latex": "V = I R"
+    },
+    {
+      "group": "recall_and_apply",
+      "number": 19,
+      "ht": false,
+      "word": "power = potential difference × current",
+      "latex": "P = V I"
+    },
+    {
+      "group": "recall_and_apply",
+      "number": 20,
+      "ht": false,
+      "word": "power = current^2 × resistance",
+      "latex": "P = I^2 R"
+    },
+    {
+      "group": "recall_and_apply",
+      "number": 21,
+      "ht": false,
+      "word": "energy transferred = power × time",
+      "latex": "E = P t"
+    },
+    {
+      "group": "recall_and_apply",
+      "number": 22,
+      "ht": false,
+      "word": "energy transferred = charge flow × potential difference",
+      "latex": "E = Q V"
+    },
+    {
+      "group": "recall_and_apply",
+      "number": 23,
+      "ht": false,
+      "word": "density = mass / volume",
+      "latex": "\\rho = \\frac{m}{V}"
+    },
+    {
+      "group": "equation_sheet",
+      "number": 1,
+      "ht": true,
+      "word": "pressure due to a column of liquid = height × density × gravitational field strength g",
+      "latex": "p = h \\rho g"
+    },
+    {
+      "group": "equation_sheet",
+      "number": 2,
+      "ht": false,
+      "word": "final velocity^2 − initial velocity^2 = 2 × acceleration × distance",
+      "latex": "v^2 - u^2 = 2 a s"
+    },
+    {
+      "group": "equation_sheet",
+      "number": 3,
+      "ht": true,
+      "word": "force = change in momentum / time taken",
+      "latex": "F = \\frac{m\\,\\Delta v}{\\Delta t}"
+    },
+    {
+      "group": "equation_sheet",
+      "number": 4,
+      "ht": false,
+      "word": "elastic potential energy = 0.5 × spring constant × extension^2",
+      "latex": "E_e = \\frac{1}{2} k e^2"
+    },
+    {
+      "group": "equation_sheet",
+      "number": 5,
+      "ht": false,
+      "word": "change in thermal energy = mass × specific heat capacity × temperature change",
+      "latex": "\\Delta E = m c \\Delta \\theta"
+    },
+    {
+      "group": "equation_sheet",
+      "number": 6,
+      "ht": false,
+      "word": "period = 1 / frequency",
+      "latex": "T = \\frac{1}{f}"
+    },
+    {
+      "group": "equation_sheet",
+      "number": 7,
+      "ht": false,
+      "word": "magnification = image height / object height",
+      "latex": "m = \\frac{h_i}{h_o}"
+    },
+    {
+      "group": "equation_sheet",
+      "number": 8,
+      "ht": true,
+      "word": "force on a conductor at right angles to a magnetic field carrying a current = magnetic flux density × current × length",
+      "latex": "F = B I l"
+    },
+    {
+      "group": "equation_sheet",
+      "number": 9,
+      "ht": false,
+      "word": "thermal energy for a change of state = mass × specific latent heat",
+      "latex": "E = m L"
+    },
+    {
+      "group": "equation_sheet",
+      "number": 10,
+      "ht": true,
+      "word": "potential difference across primary coil / potential difference across secondary coil = number of turns in primary coil / number of turns in secondary coil",
+      "latex": "\\frac{V_p}{V_s} = \\frac{n_p}{n_s}"
+    },
+    {
+      "group": "equation_sheet",
+      "number": 11,
+      "ht": true,
+      "word": "potential difference across primary coil × current in primary coil = potential difference across secondary coil × current in secondary coil",
+      "latex": "V_p I_p = V_s I_s"
+    },
+    {
+      "group": "equation_sheet",
+      "number": 12,
+      "ht": false,
+      "word": "For gases: pressure × volume = constant",
+      "latex": "pV = \\text{constant}"
+    }
+  ],
+  "equations_required_recall_and_apply": [
+    {
+      "number": 1,
+      "ht": false,
+      "word": "weight = mass × gravitational field strength g",
+      "latex": "W = m g"
+    },
+    {
+      "number": 2,
+      "ht": false,
+      "word": "work done = force × distance along the line of action of the force",
+      "latex": "W = F s"
+    },
+    {
+      "number": 3,
+      "ht": false,
+      "word": "force applied to a spring = spring constant × extension",
+      "latex": "F = k e"
+    },
+    {
+      "number": 4,
+      "ht": false,
+      "word": "moment of a force = force × distance normal to direction of force",
+      "latex": "M = F d"
+    },
+    {
+      "number": 5,
+      "ht": false,
+      "word": "pressure = force normal to a surface / area of that surface",
+      "latex": "p = \\frac{F}{A}"
+    },
+    {
+      "number": 6,
+      "ht": false,
+      "word": "distance travelled = speed × time",
+      "latex": "s = v t"
+    },
+    {
+      "number": 7,
+      "ht": false,
+      "word": "acceleration = change in velocity / time taken",
+      "latex": "a = \\frac{\\Delta v}{t}"
+    },
+    {
+      "number": 8,
+      "ht": false,
+      "word": "resultant force = mass × acceleration",
+      "latex": "F = m a"
+    },
+    {
+      "number": 9,
+      "ht": true,
+      "word": "momentum = mass × velocity",
+      "latex": "p = m v"
+    },
+    {
+      "number": 10,
+      "ht": false,
+      "word": "kinetic energy = 0.5 × mass × speed^2",
+      "latex": "E_k = \\frac{1}{2} m v^2"
+    },
+    {
+      "number": 11,
+      "ht": false,
+      "word": "gravitational potential energy = mass × gravitational field strength g × height",
+      "latex": "E_p = m g h"
+    },
+    {
+      "number": 12,
+      "ht": false,
+      "word": "power = energy transferred / time",
+      "latex": "P = \\frac{E}{t}"
+    },
+    {
+      "number": 13,
+      "ht": false,
+      "word": "power = work done / time",
+      "latex": "P = \\frac{W}{t}"
+    },
+    {
+      "number": 14,
+      "ht": false,
+      "word": "efficiency = useful output energy transfer / total input energy transfer",
+      "latex": "\\text{efficiency} = \\frac{\\text{useful output}}{\\text{total input}}"
+    },
+    {
+      "number": 15,
+      "ht": false,
+      "word": "efficiency = useful power output / total power input",
+      "latex": "\\text{efficiency} = \\frac{\\text{useful power output}}{\\text{total power input}}"
+    },
+    {
+      "number": 16,
+      "ht": false,
+      "word": "wave speed = frequency × wavelength",
+      "latex": "v = f \\lambda"
+    },
+    {
+      "number": 17,
+      "ht": false,
+      "word": "charge flow = current × time",
+      "latex": "Q = I t"
+    },
+    {
+      "number": 18,
+      "ht": false,
+      "word": "potential difference = current × resistance",
+      "latex": "V = I R"
+    },
+    {
+      "number": 19,
+      "ht": false,
+      "word": "power = potential difference × current",
+      "latex": "P = V I"
+    },
+    {
+      "number": 20,
+      "ht": false,
+      "word": "power = current^2 × resistance",
+      "latex": "P = I^2 R"
+    },
+    {
+      "number": 21,
+      "ht": false,
+      "word": "energy transferred = power × time",
+      "latex": "E = P t"
+    },
+    {
+      "number": 22,
+      "ht": false,
+      "word": "energy transferred = charge flow × potential difference",
+      "latex": "E = Q V"
+    },
+    {
+      "number": 23,
+      "ht": false,
+      "word": "density = mass / volume",
+      "latex": "\\rho = \\frac{m}{V}"
+    }
+  ],
+  "equation_sheet_select_and_apply": [
+    {
+      "number": 1,
+      "ht": true,
+      "word": "pressure due to a column of liquid = height × density × gravitational field strength g",
+      "latex": "p = h \\rho g"
+    },
+    {
+      "number": 2,
+      "ht": false,
+      "word": "final velocity^2 − initial velocity^2 = 2 × acceleration × distance",
+      "latex": "v^2 - u^2 = 2 a s"
+    },
+    {
+      "number": 3,
+      "ht": true,
+      "word": "force = change in momentum / time taken",
+      "latex": "F = \\frac{m\\,\\Delta v}{\\Delta t}"
+    },
+    {
+      "number": 4,
+      "ht": false,
+      "word": "elastic potential energy = 0.5 × spring constant × extension^2",
+      "latex": "E_e = \\frac{1}{2} k e^2"
+    },
+    {
+      "number": 5,
+      "ht": false,
+      "word": "change in thermal energy = mass × specific heat capacity × temperature change",
+      "latex": "\\Delta E = m c \\Delta \\theta"
+    },
+    {
+      "number": 6,
+      "ht": false,
+      "word": "period = 1 / frequency",
+      "latex": "T = \\frac{1}{f}"
+    },
+    {
+      "number": 7,
+      "ht": false,
+      "word": "magnification = image height / object height",
+      "latex": "m = \\frac{h_i}{h_o}"
+    },
+    {
+      "number": 8,
+      "ht": true,
+      "word": "force on a conductor at right angles to a magnetic field carrying a current = magnetic flux density × current × length",
+      "latex": "F = B I l"
+    },
+    {
+      "number": 9,
+      "ht": false,
+      "word": "thermal energy for a change of state = mass × specific latent heat",
+      "latex": "E = m L"
+    },
+    {
+      "number": 10,
+      "ht": true,
+      "word": "potential difference across primary coil / potential difference across secondary coil = number of turns in primary coil / number of turns in secondary coil",
+      "latex": "\\frac{V_p}{V_s} = \\frac{n_p}{n_s}"
+    },
+    {
+      "number": 11,
+      "ht": true,
+      "word": "potential difference across primary coil × current in primary coil = potential difference across secondary coil × current in secondary coil",
+      "latex": "V_p I_p = V_s I_s"
+    },
+    {
+      "number": 12,
+      "ht": false,
+      "word": "For gases: pressure × volume = constant",
+      "latex": "pV = \\text{constant}"
     }
   ],
   "forbidden_notes": [
@@ -99,6 +488,22 @@
     {
       "regex": "\\bF\\s*=\\s*k\\s*x\\b|\\bF\\s*=\\s*kx\\b",
       "reason": "Use AQA notation for Hooke’s law: F = k e."
+    },
+    {
+      "pattern": "z\\s*=\\s*(?:Δ|\\\\Delta)\\s*\\\\?lambda\\s*/\\s*\\\\?lambda",
+      "reason": "Redshift calculation z = Δλ/λ is not required in AQA GCSE Physics; keep red-shift qualitative."
+    },
+    {
+      "pattern": "\\bF\\s*=\\s*k\\s*x\\b",
+      "reason": "Use AQA notation for Hooke's law: F = k e (extension e, not x)."
+    },
+    {
+      "pattern": "(?:E_e|Ee)\\s*=\\s*\\\\?frac\\{1\\}\\{2\\}\\s*k\\s*x\\^2",
+      "reason": "Use AQA notation: E_e = 1/2 k e^2 (extension e, not x)."
+    },
+    {
+      "pattern": "(?:1/2)\\s*k\\s*x\\^2",
+      "reason": "Use AQA notation: 1/2 k e^2 (extension e)."
     }
   ]
 }
