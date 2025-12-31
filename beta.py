@@ -372,47 +372,6 @@ def _build_equation_guardrails(equations_pack: dict) -> tuple[str, list[tuple[st
 
 EQUATION_SHEET_TEXT, EQUATION_BANNED_PATTERNS, EQUATION_ALLOWED_CALC_PATTERNS = _build_equation_guardrails(SUBJECT_EQUATIONS_RAW)
 
-
-
-def forbidden_found(question_text: str, markscheme_text: str) -> list[str]:
-    """Return human-readable reasons if content violates GCSE/AQA guardrails.
-
-    Uses patterns from subjects/physics/equations.json (banned_concepts) plus a few
-    hard safety bans that should never appear at GCSE.
-    """
-    t = (question_text or "") + "\n" + (markscheme_text or "")
-    bad: list[str] = []
-
-    # Patterns from subject pack
-    for pat, label in (EQUATION_BANNED_PATTERNS or []):
-        try:
-            if pat and re.search(pat, t, flags=re.IGNORECASE):
-                bad.append(str(label or pat))
-        except re.error:
-            # If a regex is malformed, ignore it rather than crashing generation.
-            continue
-
-    # Hard bans (never GCSE)
-    hard = [
-        (r"\\mu_0|\bmu0\b|\bμ0\b", "Uses μ0 (not GCSE)"),
-        (r"\\epsilon_0|\bepsilon0\b|\bε0\b", "Uses ε0 (not GCSE)"),
-        (r"\bcalculus\b|\bdifferentiat\w*\b|\bintegrat\w*\b", "Uses calculus (not GCSE)"),
-    ]
-    for pat, label in hard:
-        try:
-            if re.search(pat, t, flags=re.IGNORECASE):
-                bad.append(label)
-        except re.error:
-            continue
-
-    # De-duplicate while preserving order
-    seen = set()
-    out = []
-    for x in bad:
-        if x not in seen:
-            seen.add(x)
-            out.append(x)
-    return out
 GCSE_ONLY_GUARDRAILS = str(SUBJECT_PROMPTS.get("gcse_only_guardrails", "") or "").strip()
 MARKDOWN_LATEX_RULES = str(SUBJECT_PROMPTS.get("markdown_latex_rules", "") or "").strip()
 
@@ -1909,7 +1868,7 @@ def generate_practice_question_with_ai(
         # If this is a calculation-style question, enforce equation whitelist:
         # Any required numerical calculation must be solvable using ONLY the AQA equations (plus allowed derived relations)
         # listed in equations.json (basic arithmetic/rearrangement is fine).
-        calc_requested = bool(re.search(r"calculate|work out|determine|find", q_step, flags=re.IGNORECASE))
+        calc_requested = bool(re.search(r"\bcalculate\b|\bwork\s*out\b|\bdetermine\b|\bcalculate\s+the\b", qtxt, flags=re.IGNORECASE))
         if calc_requested and EQUATION_ALLOWED_CALC_PATTERNS:
             combined_text = qtxt + "\n" + mstxt
             ok_equation = False
@@ -1920,16 +1879,17 @@ def generate_practice_question_with_ai(
                         break
                 except re.error:
                     continue
-            if not ok_equation:
+                        if not ok_equation:
                 reasons.append(
-                    "Calculation requested but no allowed AQA equation/derived relation was detected. "
-                    "Restrict calculations to equations/relations listed in equations.json (and include the equation explicitly)."
+                    "WARN: Calculation requested but no allowed AQA equation/derived relation was detected. "
+                    "Include an equation from the AQA sheet or allowed relations; teacher may need to edit."
                 )
 
         if "$" in qtxt and "\\(" in qtxt:
             reasons.append("Use $...$ for LaTeX, avoid \\(...\\).")
 
-        return (len(reasons) == 0), reasons
+        hard = [r for r in reasons if not str(r).startswith("WARN:")]
+        return (len(hard) == 0), reasons
 
     def _call_model(repair: bool, reasons: Optional[List[str]] = None) -> Dict[str, Any]:
         system = _render_template(QGEN_SYSTEM_TPL, {
@@ -2042,8 +2002,8 @@ def generate_topic_journey_with_ai(
         except Exception:
             pass
 
-        if not isinstance(steps, list) or len(steps) != steps_n:
-            reasons.append(f"steps must be a list of length {steps_n}.")
+                if not isinstance(steps, list) or len(steps) < steps_n:
+            reasons.append(f"steps must be a list with at least {steps_n} steps.")
             return False, reasons
 
         for i, stp in enumerate(steps):
@@ -2066,7 +2026,7 @@ def generate_topic_journey_with_ai(
 
             # Enforce GCSE scope + AQA notation bans per step
             q_step = str(stp.get("question_text", "") or "")
-            bad = forbidden_found(q_step, ms)
+            bad = _forbidden_found(q_step, ms)
             for b in bad:
                 reasons.append(f"Step {i+1}: {b}")
 
@@ -2083,13 +2043,16 @@ def generate_topic_journey_with_ai(
                     except re.error:
                         continue
                 if not ok_equation:
-                    reasons.append(
-                        f"Step {i+1}: Calculation requested but no allowed AQA equation/derived relation detected. "
-                        "Restrict calculations to equations/relations listed in equations.json and include the equation explicitly."
+                                        reasons.append(
+                        f"WARN: Step {i+1}: Calculation requested but no allowed AQA equation/derived relation detected. "
+                        "Include an equation from the AQA sheet or allowed relations; teacher may need to edit."
                     )
-            if f"TOTAL = {mm}" not in ms:
-                reasons.append(f"Step {i+1}: markscheme_text must end with 'TOTAL = {mm}'.")
-        return (len(reasons) == 0), reasons
+            # TOTAL line: accept common variants like "TOTAL = 3" (not necessarily last line)
+            total_ok = bool(re.search(rf"TOTAL\s*=\s*{mm}\b", ms, flags=re.IGNORECASE))
+            if not total_ok:
+                reasons.append(f"Step {i+1}: markscheme_text must include a TOTAL line like 'TOTAL = {mm}'.")
+        hard = [r for r in reasons if not str(r).startswith("WARN:")]
+        return (len(hard) == 0), reasons
 
     def _call_model(repair: bool, reasons: Optional[List[str]] = None) -> Dict[str, Any]:
         system = _render_template(JOURNEY_SYSTEM_TPL, {
@@ -2131,7 +2094,10 @@ def generate_topic_journey_with_ai(
             response_format={"type": "json_object"},
         )
         raw = response.choices[0].message.content or ""
-        return safe_parse_json(raw) or {}
+        parsed = safe_parse_json(raw) or {}
+        if isinstance(parsed, dict):
+            parsed["_raw"] = raw
+        return parsed or {}
 
     data = _call_model(repair=False)
     ok, reasons = _validate(data)
@@ -2143,6 +2109,7 @@ def generate_topic_journey_with_ai(
         else:
             data = data2 if isinstance(data2, dict) and data2 else data
             data["warnings"] = reasons2[:12]
+            data["_validation_reasons"] = reasons2[:40]
 
     # Final clean-up / normalization (display-time normalization will still run)
     steps = data.get("steps", [])
@@ -3750,7 +3717,22 @@ else:
                             )
 
                             if not isinstance(data, dict) or not data.get("steps"):
+                                # Store debug info for the error expander
+                                if isinstance(data, dict):
+                                    st.session_state["journey_last_reasons"] = data.get("_validation_reasons") or data.get("warnings")
+                                    st.session_state["journey_last_raw"] = data.get("_raw")
+                                else:
+                                    st.session_state["journey_last_reasons"] = None
+                                    st.session_state["journey_last_raw"] = None
                                 st.error("AI did not return a valid journey. Please try again.")
+                                reasons = st.session_state.get("journey_last_reasons")
+                                raw = st.session_state.get("journey_last_raw")
+                                if reasons:
+                                    with st.expander("Why it failed (debug)", expanded=False):
+                                        st.write(reasons)
+                                if raw:
+                                    with st.expander("Raw AI output (debug)", expanded=False):
+                                        st.code(raw, language="json")
                             else:
                                 token = pysecrets.token_hex(3)
                                 default_label = f"JOURNEY-{slugify(j_topic)[:24]}-{token}"
