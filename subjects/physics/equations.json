@@ -4,20 +4,7 @@
   "exam_board": "AQA",
   "spec_code": "8463",
   "tier": "foundation+higher",
-  "source": [
-    {
-      "name": "AQA GCSE Physics (8463) Specification (Version 1.1, 30 Sept 2019), Appendix A: Physics equations",
-      "type": "pdf",
-      "url": "https://cdn.sanity.io/files/p28bar15/green/e96b2cef624c0970b0f90d9678a438580aed0f65.pdf",
-      "pages": "100-102"
-    },
-    {
-      "name": "AQA GCSE Physics (8463) Physics Equations Sheet insert (Sample set 1)",
-      "type": "pdf",
-      "url": "https://filestore.aqa.org.uk/resources/physics/AQA-8463-INS-ES.PDF",
-      "pages": "1"
-    }
-  ],
+  "calculation_policy": "If the question requires a numerical calculation, it must be solvable using ONLY the AQA equations listed below plus the allowed derived relations (basic arithmetic/rearrangement/unit conversions are fine). Do NOT introduce new equations (eg Hubble's law, redshift fraction formulas, A-level/IB relationships). If a concept is outside this set, keep it qualitative.",
   "preferred_equations": [
     {
       "section": "recall",
@@ -300,33 +287,6 @@
       "pattern": "p\\s*V\\s*=\\s*\\\\text\\{constant\\}"
     }
   ],
-  "banned_concepts": [
-    {
-      "pattern": "z\\s*=\\s*\\\\?frac\\{\\\\?Delta\\\\?lambda\\}\\{\\\\?lambda\\}",
-      "reason": "AQA GCSE Physics does not require redshift calculation using z = Δλ/λ; keep redshift qualitative."
-    },
-    {
-      "pattern": "\\\\?frac\\{\\\\?Delta\\\\?lambda\\}\\{\\\\?lambda\\}",
-      "reason": "Avoid redshift fraction formula Δλ/λ for GCSE (AQA)."
-    },
-    {
-      "pattern": "\\bHubble\\b",
-      "reason": "Avoid Hubble's law / Hubble constant calculations; not required for AQA GCSE Physics."
-    },
-    {
-      "pattern": "\\bH_0\\b|\\bH0\\b|\\bHubble\\s*constant\\b",
-      "reason": "Hubble constant calculations are out-of-scope for AQA GCSE Physics."
-    },
-    {
-      "pattern": "\\bv\\s*=\\s*H\\s*0?\\s*d\\b",
-      "reason": "Do not use v = H0 d (Hubble's law) calculations at GCSE (AQA)."
-    }
-  ],
-  "notes": [
-    "Notation is AQA-aligned (eg extension is e, elastic potential energy Ee).",
-    "HT notes reflect Appendix A markings; equation-sheet HT tags are also included."
-  ],
-  "calculation_policy": "If the question requires a numerical calculation, it must be solvable using ONLY the AQA equations listed below plus the allowed derived relations (basic arithmetic/rearrangement/unit conversions are fine). Do NOT introduce new equations (eg Hubble's law, redshift fraction formulas, A-level/IB relationships). If a concept is outside this set, keep it qualitative.",
   "allowed_relations": [
     {
       "name": "Series circuit resistance",
@@ -351,6 +311,60 @@
       "latex": "I_{total}=I_1+I_2+\\dots",
       "pattern": "I_?\\s*\\{?total\\}?\\s*=\\s*I_?\\s*\\{?1\\}?\\s*\\+\\s*I_?\\s*\\{?2\\}?",
       "notes": "GCSE circuit rule (derived)."
+    },
+    {
+      "name": "Area of rectangle",
+      "latex": "A = l w",
+      "pattern": "A\\s*=\\s*l\\s*w",
+      "notes": "GCSE maths, used in physics for cross-sectional area."
+    },
+    {
+      "name": "Area of circle",
+      "latex": "A = \\pi r^2",
+      "pattern": "A\\s*=\\s*\\\\?pi\\s*r\\^2|A\\s*=\\s*π\\s*r\\^2",
+      "notes": "GCSE maths."
+    },
+    {
+      "name": "Volume of cuboid",
+      "latex": "V = l w h",
+      "pattern": "V\\s*=\\s*l\\s*w\\s*h",
+      "notes": "GCSE maths."
+    },
+    {
+      "name": "Volume of cylinder",
+      "latex": "V = \\pi r^2 h",
+      "pattern": "V\\s*=\\s*\\\\?pi\\s*r\\^2\\s*h|V\\s*=\\s*π\\s*r\\^2\\s*h",
+      "notes": "GCSE maths."
+    }
+  ],
+  "banned_concepts": [
+    {
+      "pattern": "z\\s*=\\s*\\\\?frac\\{\\\\?Delta\\\\?lambda\\}\\{\\\\?lambda\\}",
+      "reason": "AQA GCSE Physics does not require redshift calculation using z = Δλ/λ; keep redshift qualitative."
+    },
+    {
+      "pattern": "\\\\?frac\\{\\\\?Delta\\\\?lambda\\}\\{\\\\?lambda\\}",
+      "reason": "Avoid redshift fraction formula Δλ/λ for GCSE (AQA)."
+    },
+    {
+      "pattern": "\\bHubble\\b",
+      "reason": "Avoid Hubble's law / Hubble constant calculations; not required for AQA GCSE Physics."
+    },
+    {
+      "pattern": "\\bH_0\\b|\\bH0\\b|\\bHubble\\s*constant\\b",
+      "reason": "Hubble constant calculations are out-of-scope for AQA GCSE Physics."
+    },
+    {
+      "pattern": "\\bv\\s*=\\s*H\\s*0?\\s*d\\b",
+      "reason": "Do not use v = H0 d (Hubble's law) calculations at GCSE (AQA)."
+    },
+    {
+      "pattern": "\\brecession(al)?\\s*velocity\\b|\\brecessional\\b",
+      "reason": "Avoid cosmology recession velocity calculations; keep qualitative at GCSE."
+    },
+    {
+      "pattern": "\\bv\\s*=\\s*H\\s*0?\\s*d\\b|\\bv\\s*=\\s*H_0\\s*d\\b",
+      "reason": "Do not use Hubble's law calculations at GCSE."
     }
   ]
 }
