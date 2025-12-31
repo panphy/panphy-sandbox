@@ -7,7 +7,7 @@
     html, body {
       margin: 0;
       padding: 0;
-      background: #F0F2F6;
+      background: #ffffff;
       overflow: hidden;
       font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
     }
@@ -237,7 +237,8 @@
   function applyArgs(newArgs) {
     args = Object.assign(args, newArgs || {});
     // apply background changes immediately (preserve content)
-    resizer.style.background = (args.background_color || "#f8f9fa");
+    resizer.style.background = "transparent";
+    canvas.style.background = (args.background_color || "#F0F2F6");
     // initial height (only if not resized yet)
     const desiredH = Math.max(200, parseInt(args.canvas_height || args.height || 520, 10));
     if (!resizer.dataset.userResized) {
