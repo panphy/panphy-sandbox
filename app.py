@@ -3477,32 +3477,40 @@ else:
                             "Focus sliders: 0 = none, 1 = light, 2 = medium, 3 = heavy. This adjusts the mix of step types in the journey."
                         )
 
-                        emph_retrieval = st.slider(
-                            "Retrieval focus",
-                            0, 3, 2,
-                            key="jour_emph_retrieval",
-                            help="How much of the journey should involve recall, key facts, definitions, and short prompts.",
+                        # Compact focus controls (sliders are visually large in Streamlit)
+                        st.caption(
+                            "Focus (0-3): 0 = none, 1 = light, 2 = medium, 3 = heavy. This adjusts the mix of step types in the journey."
                         )
-                        emph_calc = st.slider(
-                            "Maths/calculation focus",
-                            0, 3, 2,
-                            key="jour_emph_calc",
-                            help="How much of the journey should involve calculations, rearranging equations, units and significant figures.",
-                        )
-                        emph_graph = st.slider(
-                            "Graphs focus",
-                            0, 3, 1,
-                            key="jour_emph_graph",
-                            help="How much of the journey should involve graphs, interpreting data, gradients and proportionality.",
-                        )
-                        emph_prac = st.slider(
-                            "Practical focus",
-                            0, 3, 1,
-                            key="jour_emph_prac",
-                            help="How much of the journey should involve practical methods, required apparatus, variables, and analysis.",
-                        )
-
-                        j_assignment = st.text_input("Assignment name for saving", value="Topic Journey", key="jour_assignment")
+                        fcols = st.columns(4)
+                        with fcols[0]:
+                            emph_retrieval = st.number_input(
+                                "Retrieval",
+                                min_value=0, max_value=3, value=int(st.session_state.get("jour_emph_retrieval", 2)),
+                                step=1, key="jour_emph_retrieval",
+                                help="Recall, key facts, definitions, and short prompts."
+                            )
+                        with fcols[1]:
+                            emph_calc = st.number_input(
+                                "Maths",
+                                min_value=0, max_value=3, value=int(st.session_state.get("jour_emph_calc", 2)),
+                                step=1, key="jour_emph_calc",
+                                help="Calculations, rearranging equations, units and significant figures."
+                            )
+                        with fcols[2]:
+                            emph_graph = st.number_input(
+                                "Graphs",
+                                min_value=0, max_value=3, value=int(st.session_state.get("jour_emph_graph", 1)),
+                                step=1, key="jour_emph_graph",
+                                help="Interpreting data, gradients and proportionality."
+                            )
+                        with fcols[3]:
+                            emph_prac = st.number_input(
+                                "Practical",
+                                min_value=0, max_value=3, value=int(st.session_state.get("jour_emph_prac", 1)),
+                                step=1, key="jour_emph_prac",
+                                help="Practical methods, apparatus, variables, and analysis."
+                            )
+j_assignment = st.text_input("Assignment name for saving", value="Topic Journey", key="jour_assignment")
                         j_tags = st.text_input("Tags (comma separated)", value="", key="jour_tags")
 
                     # --- Right column: actions ---
@@ -3534,10 +3542,9 @@ else:
 
                                 def task_generate():
                                     # 10 minutes, 5 steps is fixed
-                                    return generate_topic_journey_ai(
-                                        topic_plain=topic_plain,
+                                    return generate_topic_journey_with_ai(
+                                        topic_plain_english=topic_plain,
                                         duration_minutes=j_duration,
-                                        steps=5,
                                         emphasis={
                                             "retrieval": int(emph_retrieval),
                                             "calculation": int(emph_calc),
