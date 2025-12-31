@@ -3510,7 +3510,7 @@ else:
                                 step=1, key="jour_emph_prac",
                                 help="Practical methods, apparatus, variables, and analysis."
                             )
-j_assignment = st.text_input("Assignment name for saving", value="Topic Journey", key="jour_assignment")
+                        j_assignment = st.text_input("Assignment name for saving", value="Topic Journey", key="jour_assignment")
                         j_tags = st.text_input("Tags (comma separated)", value="", key="jour_tags")
 
                     # --- Right column: actions ---
