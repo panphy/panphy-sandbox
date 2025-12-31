@@ -4,7 +4,6 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <style>
-
     html, body {
       margin: 0;
       padding: 0;
@@ -12,38 +11,34 @@
       overflow: hidden;
       font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
     }
-    #wrap {
+    /* Resizable drawing box (like a textarea). Width follows the Streamlit container. */
+    #resizer {
       width: 100%;
-      height: 100%;
-      box-sizing: border-box;
-      border-radius: 12px;
+      height: 520px;
+      resize: vertical;
       overflow: hidden;
-      background: #ffffff;
-      border: 1px solid rgba(128,128,128,0.35);
+      box-sizing: border-box;
+      border: 1px solid rgba(0,0,0,0.18);
+      border-radius: 14px;
+      background: transparent;
+      position: relative;
     }
-    canvas {
-      touch-action: none; /* prevents scrolling while drawing */
-      display: block;
+    #c {
       width: 100%;
       height: 100%;
-      border-radius: 0;
-      box-sizing: border-box;
-      border: 0;
+      display: block;
+      touch-action: none; /* critical for pointer events on touch/stylus */
+      user-select: none;
     }
-
   </style>
 </head>
 <body>
-  <div id="wrap">
+  <div id="resizer">
     <canvas id="c"></canvas>
   </div>
 
   <script>
   // Minimal Streamlit bi-directional component plumbing (no React/tooling).
-  // Based on Streamlit community snippet (tvst) + variations:
-  // - streamlit:componentReady
-  // - streamlit:setFrameHeight
-  // - streamlit:setComponentValue
   const RENDER = "streamlit:render";
   const COMPONENT_READY = "streamlit:componentReady";
   const SET_COMPONENT_VALUE = "streamlit:setComponentValue";
@@ -63,18 +58,20 @@
     sendMessageToStreamlitClient(COMPONENT_READY, { apiVersion: 1 });
   }
 
+  const resizer = document.getElementById("resizer");
   const canvas = document.getElementById("c");
   const ctx = canvas.getContext("2d", { willReadFrequently: false });
 
+  // args from Streamlit (defaults here)
   let args = {
-    width: 600,
-    height: 400,
+    canvas_width: 600,
+    canvas_height: 520,
     stroke_width: 2,
     stroke_color: "#000000",
     background_color: "#ffffff",
     pen_only: false,
-    tool: "pen",
-    command: null,
+    tool: "pen", // "pen" | "eraser"
+    command: null, // "undo" | "clear"
     command_nonce: 0,
     initial_data_url: null,
   };
@@ -88,31 +85,44 @@
   let history = [];
   let lastCommandNonce = -1;
 
-  function resizeAndReset(w, h) {
-    // handle device pixel ratio for sharpness
+  function resizeCanvasTo(w, h, preserve=true) {
+    // Preserve current bitmap before resizing (optional)
+    let snapshot = null;
+    if (preserve) {
+      try { snapshot = canvas.toDataURL("image/png"); } catch (e) { snapshot = null; }
+    }
+
     const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.max(1, Math.floor(w * dpr));
+    canvas.height = Math.max(1, Math.floor(h * dpr));
     canvas.style.width = w + "px";
     canvas.style.height = h + "px";
-    canvas.width = Math.floor(w * dpr);
-    canvas.height = Math.floor(h * dpr);
+
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-    // fill background
+    // Fill background
     ctx.fillStyle = args.background_color;
     ctx.fillRect(0, 0, w, h);
 
-    isEmpty = true;
-    history = [];
+    if (snapshot) {
+      drawImageDataUrl(snapshot).then(() => {
+        // best-effort: keep isEmpty as it was
+        emitValue();
+      });
+    } else {
+      emitValue();
+    }
   }
 
   function drawImageDataUrl(dataUrl) {
     return new Promise((resolve) => {
       const img = new Image();
       img.onload = () => {
-        // Fill bg then draw image at 1x CSS pixels (transform already set)
+        const w = resizer.clientWidth;
+        const h = resizer.clientHeight;
         ctx.fillStyle = args.background_color;
-        ctx.fillRect(0, 0, args.width, args.height);
-        ctx.drawImage(img, 0, 0, args.width, args.height);
+        ctx.fillRect(0, 0, w, h);
+        ctx.drawImage(img, 0, 0, w, h);
         resolve(true);
       };
       img.onerror = () => resolve(false);
@@ -121,15 +131,20 @@
   }
 
   function snapshotToHistory() {
-    // Keep at most 30 snapshots to bound memory
-    const url = canvas.toDataURL("image/png");
-    history.push(url);
-    if (history.length > 30) history.shift();
+    try {
+      const url = canvas.toDataURL("image/png");
+      history.push(url);
+      if (history.length > 30) history.shift();
+    } catch (e) {}
   }
 
   function emitValue() {
-    const url = canvas.toDataURL("image/png");
-    sendDataToPython({ data_url: url, is_empty: isEmpty });
+    try {
+      const url = canvas.toDataURL("image/png");
+      sendDataToPython({ data_url: url, is_empty: isEmpty });
+    } catch (e) {
+      sendDataToPython({ data_url: null, is_empty: true });
+    }
   }
 
   function allowedPointer(e) {
@@ -138,9 +153,14 @@
   }
 
   function isHover(e) {
-    // On devices that support hover (incl. some stylus), pressure==0 and buttons==0 indicates hover.
-    // Also guard against move events without contact.
     return (e.pressure === 0 && e.buttons === 0);
+  }
+
+  function getXY(e) {
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    return { x, y };
   }
 
   function pointerDown(e) {
@@ -148,22 +168,11 @@
     if (isHover(e)) return;
 
     drawing = true;
-    const rect = canvas.getBoundingClientRect();
-    lastX = e.clientX - rect.left;
-    lastY = e.clientY - rect.top;
+    const { x, y } = getXY(e);
+    lastX = x;
+    lastY = y;
 
-    // Capture pointer so we keep receiving move/up
-    try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
-  }
-
-  function pointerMove(e) {
-    if (!drawing) return;
-    if (!allowedPointer(e)) return;
-    if (isHover(e)) return;
-
-    const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
+    canvas.setPointerCapture(e.pointerId);
 
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
@@ -174,6 +183,14 @@
     } else {
       ctx.strokeStyle = args.stroke_color;
     }
+  }
+
+  function pointerMove(e) {
+    if (!drawing) return;
+    if (!allowedPointer(e)) return;
+    if (isHover(e)) return;
+
+    const { x, y } = getXY(e);
 
     ctx.beginPath();
     ctx.moveTo(lastX, lastY);
@@ -189,8 +206,8 @@
   function pointerUp(e) {
     if (!drawing) return;
     drawing = false;
+    try { canvas.releasePointerCapture(e.pointerId); } catch (e) {}
 
-    // Save snapshot for undo and emit value (only after stroke end)
     snapshotToHistory();
     emitValue();
   }
@@ -199,100 +216,111 @@
   canvas.addEventListener("pointermove", pointerMove);
   canvas.addEventListener("pointerup", pointerUp);
   canvas.addEventListener("pointercancel", pointerUp);
-  canvas.addEventListener("pointerleave", (e) => { /* do nothing */ });
 
-  async function applyCommand(cmd) {
-    if (!cmd) return;
-    if (cmd === "clear") {
-      ctx.fillStyle = args.background_color;
-      ctx.fillRect(0, 0, args.width, args.height);
-      isEmpty = true;
-      history = [];
-      emitValue();
-      return;
-    }
-    if (cmd === "undo") {
-      // Undo: pop current snapshot, then restore previous
-      if (history.length === 0) {
-        // nothing to undo
-        ctx.fillStyle = args.background_color;
-        ctx.fillRect(0, 0, args.width, args.height);
-        isEmpty = true;
-        emitValue();
-        return;
-      }
-      history.pop(); // remove latest
-      const prev = history.length ? history[history.length - 1] : null;
-      if (!prev) {
-        ctx.fillStyle = args.background_color;
-        ctx.fillRect(0, 0, args.width, args.height);
-        isEmpty = true;
-        emitValue();
-        return;
-      }
-      const ok = await drawImageDataUrl(prev);
-      isEmpty = !ok ? true : false;
-      emitValue();
-      return;
-    }
+  // Keep iframe height in sync with the resizer height
+  function syncFrameHeight() {
+    setFrameHeight(resizer.clientHeight);
   }
 
-  async function onDataFromPython(event) {
-    if (event.data.type !== RENDER) return;
-    const a = event.data.args || {};
+  // Resize observer for both:
+  // - sidebar show/hide (iframe width changes)
+  // - user dragging the resizer handle (height changes)
+  const ro = new ResizeObserver(() => {
+    const w = Math.max(1, resizer.clientWidth);
+    const h = Math.max(1, resizer.clientHeight);
+    resizeCanvasTo(w, h, true);
+    syncFrameHeight();
+  });
+  ro.observe(resizer);
 
-    // Update args (with defaults)
-    args.width = a.width ?? args.width;
-    args.height = a.height ?? args.height;
-    args.stroke_width = a.stroke_width ?? args.stroke_width;
-    args.stroke_color = a.stroke_color ?? args.stroke_color;
-    args.background_color = a.background_color ?? args.background_color;
-    args.pen_only = a.pen_only ?? args.pen_only;
-    args.tool = a.tool ?? args.tool;
-
-    // Resize only if needed (keeps drawing stable)
-    const w = Number(args.width) || 600;
-    const h = Number(args.height) || 400;
-
-    const needResize = (canvas.style.width !== (w + "px")) || (canvas.style.height !== (h + "px"));
-    if (needResize) {
-      resizeAndReset(w, h);
+  function applyArgs(newArgs) {
+    args = Object.assign(args, newArgs || {});
+    // apply background changes immediately (preserve content)
+    resizer.style.background = "transparent";
+    // initial height (only if not resized yet)
+    const desiredH = Math.max(200, parseInt(args.canvas_height || args.height || 520, 10));
+    if (!resizer.dataset.userResized) {
+      resizer.style.height = desiredH + "px";
     }
+    // always sync size and height
+    const w = Math.max(1, resizer.clientWidth);
+    const h = Math.max(1, resizer.clientHeight);
+    resizeCanvasTo(w, h, true);
+    syncFrameHeight();
 
-    // Initial restore (optional)
-    if (a.initial_data_url && typeof a.initial_data_url === "string") {
-      // only restore if blank
-      if (isEmpty) {
-        const ok = await drawImageDataUrl(a.initial_data_url);
+    // initial data url (only once, unless explicit)
+    if (args.initial_data_url && history.length === 0 && isEmpty) {
+      drawImageDataUrl(args.initial_data_url).then((ok) => {
         if (ok) {
           isEmpty = false;
           snapshotToHistory();
           emitValue();
         }
+      });
+    }
+
+    // commands (undo/clear)
+    const cmd = args.command;
+    const nonce = args.command_nonce;
+    if (nonce !== lastCommandNonce && cmd) {
+      lastCommandNonce = nonce;
+      if (cmd === "clear") {
+        const w2 = resizer.clientWidth;
+        const h2 = resizer.clientHeight;
+        ctx.fillStyle = args.background_color;
+        ctx.fillRect(0, 0, w2, h2);
+        isEmpty = true;
+        history = [];
+        emitValue();
+        return;
+      }
+      if (cmd === "undo") {
+        if (history.length === 0) {
+          const w2 = resizer.clientWidth;
+          const h2 = resizer.clientHeight;
+          ctx.fillStyle = args.background_color;
+          ctx.fillRect(0, 0, w2, h2);
+          isEmpty = true;
+          emitValue();
+          return;
+        }
+        // pop current snapshot
+        history.pop();
+        const prev = history.length ? history[history.length - 1] : null;
+        if (!prev) {
+          const w2 = resizer.clientWidth;
+          const h2 = resizer.clientHeight;
+          ctx.fillStyle = args.background_color;
+          ctx.fillRect(0, 0, w2, h2);
+          isEmpty = true;
+          emitValue();
+          return;
+        }
+        drawImageDataUrl(prev).then(() => {
+          isEmpty = false;
+          emitValue();
+        });
       }
     }
-
-    // Commands are gated by command_nonce so they don't repeat on reruns
-    const nonce = Number(a.command_nonce ?? 0);
-    if (nonce !== lastCommandNonce) {
-      lastCommandNonce = nonce;
-      const cmd = a.command ?? null;
-      await applyCommand(cmd);
-    }
-
-    // adjust frame height
-    setFrameHeight(h + 6);
   }
 
-  window.addEventListener("message", onDataFromPython);
+  // Mark the resizer as user-resized when they mouseup after drag
+  resizer.addEventListener("mouseup", () => { resizer.dataset.userResized = "1"; });
+  resizer.addEventListener("touchend", () => { resizer.dataset.userResized = "1"; });
 
-  // Initialize
-  initComponent();
-
-  // In case Streamlit doesn't immediately size the iframe
-  window.addEventListener("load", () => {
-    setTimeout(() => setFrameHeight((args.height || 400) + 6), 0);
+  // Streamlit event listener
+  window.addEventListener("message", (event) => {
+    const data = event.data;
+    if (!data || !data.isStreamlitMessage) return;
+    if (data.type === RENDER) {
+      applyArgs(data.args || {});
+    }
   });
+
+  // Kick off
+  initComponent();
+  // Set initial frame height
+  setTimeout(() => { syncFrameHeight(); }, 0);
   </script>
 </body>
 </html>
