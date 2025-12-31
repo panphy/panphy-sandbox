@@ -33,6 +33,8 @@ def stylus_canvas(
     command: Optional[str] = None,
     command_nonce: int = 0,
     initial_data_url: Optional[str] = None,
+    initial_draw_width: Optional[int] = None,
+    initial_draw_height: Optional[int] = None,
     key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Render the canvas component and return the latest JSON value."""
@@ -47,6 +49,8 @@ def stylus_canvas(
         command=command,
         command_nonce=int(command_nonce),
         initial_data_url=initial_data_url,
+        initial_draw_width=int(initial_draw_width) if initial_draw_width else None,
+        initial_draw_height=int(initial_draw_height) if initial_draw_height else None,
         default={"data_url": None, "is_empty": True, "w": int(width), "h": int(height)},
         key=key,
     )
