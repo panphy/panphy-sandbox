@@ -175,80 +175,9 @@ def _persist_track_to_browser(track_value: str):
         unsafe_allow_html=True
     )
 def _inject_track_theme_css(track_value: str):
-    """
-    Streamlit theme.primaryColor is static, but we can strengthen the visual cue by
-    injecting a CSS override for the primary accent color based on Track.
+    """No-op: dynamic theme switching disabled (keep default Streamlit theme)."""
+    return
 
-    This is best-effort (Streamlit internals change), so we target both Streamlit CSS
-    variables and common BaseWeb primitives used by widgets.
-    """
-    track_value = (track_value or "").strip().lower()
-    if track_value == "combined":
-        primary = "#F28C28"  # orange
-        primary_soft = "#FCE1C2"
-    else:
-        primary = "#1BC6B4"  # turquoise
-        primary_soft = "#BFF3ED"
-
-    st.markdown(
-        f"""
-<style>
-/* Primary accent variables (multiple roots for robustness) */
-:root, html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stSidebar"] {{
-  --panphy-accent: {primary} !important;
-  --panphy-accent-soft: {primary_soft} !important;
-  --primary-color: {primary} !important;
-  --primaryColor: {primary} !important;
-}}
-
-/* Tabs underline + active tab */
-.stTabs [data-baseweb="tab-border"] {{
-  background-color: var(--panphy-accent) !important;
-}}
-.stTabs [data-baseweb="tab"][aria-selected="true"] {{
-  color: var(--panphy-accent) !important;
-}}
-
-/* Buttons */
-button[data-testid="baseButton-primary"] {{
-  background-color: var(--panphy-accent) !important;
-  border-color: var(--panphy-accent) !important;
-}}
-button[data-testid="baseButton-primary"]:hover {{
-  filter: brightness(0.98);
-}}
-
-/* Links */
-a, a:visited {{
-  color: var(--panphy-accent) !important;
-}}
-
-/* Radio / checkbox (BaseWeb) */
-[data-baseweb="radio"] input:checked + div {{
-  border-color: var(--panphy-accent) !important;
-}}
-[data-baseweb="radio"] input:checked + div > div {{
-  background-color: var(--panphy-accent) !important;
-}}
-[data-baseweb="checkbox"] input:checked + div {{
-  border-color: var(--panphy-accent) !important;
-  background-color: var(--panphy-accent) !important;
-}}
-
-/* Selectbox focus ring (BaseWeb) */
-[data-baseweb="select"] > div:focus-within {{
-  box-shadow: 0 0 0 2px var(--panphy-accent-soft) !important;
-  border-color: var(--panphy-accent) !important;
-}}
-
-/* Slider */
-[data-testid="stSlider"] [role="slider"] {{
-  outline-color: var(--panphy-accent) !important;
-}}
-</style>
-""",
-        unsafe_allow_html=True
-    )
 def init_track_state():
     # Run restore script first so first load picks up localStorage
     if "track_init_done" not in st.session_state:
@@ -3512,9 +3441,18 @@ else:
 
                         selected_topics = [t for t in topic_rows if t]
                         topic_text = " + ".join(selected_topics)
+                        # Track eligibility derived from selected topics:
+                        # if any selected topic is separate_only, treat the whole generated item as separate_only.
+                        draft_track_ok = "both"
+                        for _t in selected_topics:
+                            if get_topic_track_ok(_t) == "separate_only":
+                                draft_track_ok = "separate_only"
+                                break
+
+
 
                         # Track eligibility derived from topic entries (if any selected topic is separate_only, treat the whole item as separate_only)
-                        draft_track_ok = jour_draft_track_okqtype = st.selectbox("Question type", QUESTION_TYPES, key="gen_qtype")
+                        qtype = st.selectbox("Question type", QUESTION_TYPES, key="gen_qtype")
                         difficulty = st.selectbox("Difficulty", DIFFICULTIES, key="gen_difficulty")
                         marks_req = st.number_input("Max marks (target)", min_value=1, max_value=12, value=4, step=1, key="gen_marks")
 
