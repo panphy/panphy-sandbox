@@ -274,6 +274,13 @@ QGEN_REPAIR_PREFIX_TPL = str(SUBJECT_PROMPTS.get("qgen_repair_prefix", "") or ""
 JOURNEY_SYSTEM_TPL = str(SUBJECT_PROMPTS.get("journey_system", "") or "")
 JOURNEY_USER_TPL = str(SUBJECT_PROMPTS.get("journey_user", "") or "")
 JOURNEY_REPAIR_PREFIX_TPL = str(SUBJECT_PROMPTS.get("journey_repair_prefix", "") or "")
+# Strategy 2 (two-phase Topic Journey): plan first, then generate steps in chunks.
+JOURNEY_PLAN_SYSTEM_TPL = str(SUBJECT_PROMPTS.get("journey_plan_system", "") or JOURNEY_SYSTEM_TPL)
+JOURNEY_PLAN_USER_TPL = str(SUBJECT_PROMPTS.get("journey_plan_user", "") or JOURNEY_USER_TPL)
+JOURNEY_PLAN_REPAIR_PREFIX_TPL = str(SUBJECT_PROMPTS.get("journey_plan_repair_prefix", "") or JOURNEY_REPAIR_PREFIX_TPL)
+JOURNEY_STEPS_SYSTEM_TPL = str(SUBJECT_PROMPTS.get("journey_steps_system", "") or JOURNEY_SYSTEM_TPL)
+JOURNEY_STEPS_USER_TPL = str(SUBJECT_PROMPTS.get("journey_steps_user", "") or JOURNEY_USER_TPL)
+JOURNEY_STEPS_REPAIR_PREFIX_TPL = str(SUBJECT_PROMPTS.get("journey_steps_repair_prefix", "") or JOURNEY_REPAIR_PREFIX_TPL)
 
 FEEDBACK_SYSTEM_TPL = str(SUBJECT_PROMPTS.get("feedback_system", "") or "")
 
@@ -1815,17 +1822,173 @@ def generate_topic_journey_with_ai(
     duration_minutes: int,
     emphasis: Dict[str, int],
 ) -> Dict[str, Any]:
-    steps_n = DURATION_TO_STEPS.get(int(duration_minutes), 8)
+    """
+    Strategy 2: Two-phase Topic Journey generation.
+    Phase 1: Create a step plan (objectives, step types, marks, spec refs) for the full journey.
+    Phase 2: Generate steps in small chunks that strictly follow the plan.
+
+    Returns a dict compatible with the app's journey_json shape.
+    """
     topic_plain_english = (topic_plain_english or "").strip()
-    def _validate(d: Dict[str, Any]) -> Tuple[bool, List[str]]:
+    duration_minutes = int(duration_minutes)
+    steps_n = DURATION_TO_STEPS.get(int(duration_minutes), 8)
+    track = (st.session_state.get("track", TRACK_DEFAULT) or "combined").strip()
+
+    def _extract_total_from_markscheme(ms: str) -> Optional[int]:
+        m = re.search(r"\btotal\b\s*[:=]\s*(\d+)\b", ms or "", flags=re.IGNORECASE)
+        if not m:
+            return None
+        try:
+            return int(m.group(1))
+        except Exception:
+            return None
+
+    def _normalize_total_line(ms: str, max_marks: int) -> str:
+        total_line = f"TOTAL = {int(max_marks)}"
+        if not str(ms or "").strip():
+            return total_line
+        total_re = re.compile(r"^\s*TOTAL\s*[:=]\s*\d+\s*(marks)?\s*$", flags=re.IGNORECASE)
+        kept_lines = [line for line in str(ms).splitlines() if not total_re.match(line)]
+        if kept_lines:
+            return ("\n".join(kept_lines).rstrip() + "\n" + total_line).strip()
+        return total_line
+
+    def _json_from_model(system: str, user: str, max_tokens: int) -> Dict[str, Any]:
+        resp = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": (system or "").strip()},
+                {"role": "user", "content": (user or "").strip()},
+            ],
+            max_completion_tokens=int(max_tokens),
+            response_format={"type": "json_object"},
+        )
+        raw = ""
+        try:
+            raw = resp.choices[0].message.content or ""
+        except Exception:
+            raw = ""
+        raw = (raw or "").strip()
+        return safe_parse_json(raw) or {}
+
+    def _render_system(tpl: str) -> str:
+        return _render_template(tpl, {
+            "GCSE_ONLY_GUARDRAILS": GCSE_ONLY_GUARDRAILS,
+            "MARKDOWN_LATEX_RULES": MARKDOWN_LATEX_RULES,
+            "TRACK": track,
+        }).strip()
+
+    def _validate_plan(d: Dict[str, Any]) -> Tuple[bool, List[str]]:
         reasons: List[str] = []
         if not isinstance(d, dict):
             return False, ["Output is not a JSON object."]
-        if str(d.get("topic", "")).strip() == "":
-            reasons.append("Missing topic.")
+        sp = d.get("step_plan", [])
+        if not isinstance(sp, list) or len(sp) != steps_n:
+            reasons.append(f"step_plan must be a list with exactly {steps_n} items.")
+            return False, reasons
+
+        for i, it in enumerate(sp):
+            if not isinstance(it, dict):
+                reasons.append(f"step_plan[{i+1}] is not an object.")
+                continue
+            if not str(it.get("objective", "")).strip():
+                reasons.append(f"step_plan[{i+1}]: missing objective.")
+            if not str(it.get("step_type", "")).strip():
+                reasons.append(f"step_plan[{i+1}]: missing step_type.")
+            try:
+                mm = int(it.get("max_marks", 0))
+            except Exception:
+                mm = 0
+            if mm <= 0 or mm > 12:
+                reasons.append(f"step_plan[{i+1}]: max_marks must be 1-12.")
+            refs = it.get("spec_refs", [])
+            if refs is not None and (not isinstance(refs, list)):
+                reasons.append(f"step_plan[{i+1}]: spec_refs must be a list.")
+        return (len(reasons) == 0), reasons
+
+    def _build_fallback_plan() -> Dict[str, Any]:
+        emphasis_defaults = emphasis or {}
+        type_weights = [
+            ("recall", int(emphasis_defaults.get("recall", 1))),
+            ("reasoning", int(emphasis_defaults.get("explanation", emphasis_defaults.get("reasoning", 2)))),
+            ("calculation", int(emphasis_defaults.get("calculation", 2))),
+            ("graph", int(emphasis_defaults.get("graph", 1))),
+            ("practical", int(emphasis_defaults.get("practical", 1))),
+        ]
+        weighted_types = []
+        for t, w in type_weights:
+            weighted_types.extend([t] * max(1, w))
+        if not weighted_types:
+            weighted_types = ["recall", "reasoning", "calculation"]
+
+        step_plan = []
+        for i in range(steps_n):
+            step_type = weighted_types[i % len(weighted_types)]
+            max_marks = min(12, 2 + (i // 2))
+            step_plan.append({
+                "objective": f"Step {i + 1}: {step_type} practice on {topic_plain_english}",
+                "step_type": step_type,
+                "max_marks": max_marks,
+                "spec_refs": [],
+            })
+
+        plan_md = "\n".join([f"{i + 1}. {sp['objective']}" for i, sp in enumerate(step_plan)])
+        return {
+            "topic": topic_plain_english,
+            "duration_minutes": duration_minutes,
+            "checkpoint_every": int(JOURNEY_CHECKPOINT_EVERY),
+            "plan_markdown": plan_md,
+            "spec_alignment": [],
+            "step_plan": step_plan,
+        }
+
+    def _normalize_steps_chunk(d: Dict[str, Any], chunk_plan: List[Dict[str, Any]]) -> Dict[str, Any]:
+        if not isinstance(d, dict):
+            return d
         steps = d.get("steps", [])
-        if not isinstance(steps, list) or len(steps) != steps_n:
-            reasons.append(f"steps must be a list of length {steps_n}.")
+        if not isinstance(steps, list):
+            return d
+
+        for i, stp in enumerate(steps):
+            if not isinstance(stp, dict):
+                continue
+            plan = chunk_plan[i] if i < len(chunk_plan) and isinstance(chunk_plan[i], dict) else {}
+            plan_obj = str(plan.get("objective", "") or "").strip()
+            if plan_obj:
+                stp["objective"] = plan_obj
+            plan_mm = plan.get("max_marks", stp.get("max_marks", 1))
+            try:
+                plan_mm = int(plan_mm)
+            except Exception:
+                plan_mm = 1
+            stp["max_marks"] = plan_mm
+            stp["question_text"] = str(stp.get("question_text", "") or "").strip()
+            stp["markscheme_text"] = str(stp.get("markscheme_text", "") or "").strip()
+            if stp["markscheme_text"] or stp["question_text"]:
+                stp["markscheme_text"] = _normalize_total_line(stp["markscheme_text"], plan_mm)
+
+            if not isinstance(stp.get("misconceptions", []), list):
+                stp["misconceptions"] = []
+            stp["misconceptions"] = [str(x).strip() for x in (stp.get("misconceptions", []) or []) if str(x).strip()][:6]
+
+            plan_refs = plan.get("spec_refs", []) if isinstance(plan, dict) else []
+            if not isinstance(stp.get("spec_refs", []), list):
+                stp["spec_refs"] = []
+            if not stp.get("spec_refs") and isinstance(plan_refs, list):
+                stp["spec_refs"] = [str(x).strip() for x in plan_refs if str(x).strip()][:6]
+            else:
+                stp["spec_refs"] = [str(x).strip() for x in (stp.get("spec_refs", []) or []) if str(x).strip()][:6]
+
+        d["steps"] = steps
+        return d
+
+    def _validate_steps_chunk(d: Dict[str, Any], expected_len: int) -> Tuple[bool, List[str]]:
+        reasons: List[str] = []
+        if not isinstance(d, dict):
+            return False, ["Output is not a JSON object."]
+        steps = d.get("steps", [])
+        if not isinstance(steps, list) or len(steps) != int(expected_len):
+            reasons.append(f"steps must be a list with exactly {int(expected_len)} steps.")
             return False, reasons
 
         for i, stp in enumerate(steps):
@@ -1836,78 +1999,132 @@ def generate_topic_journey_with_ai(
                 reasons.append(f"Step {i+1}: missing objective.")
             if not str(stp.get("question_text", "")).strip():
                 reasons.append(f"Step {i+1}: missing question_text.")
-            if not str(stp.get("markscheme_text", "")).strip():
-                reasons.append(f"Step {i+1}: missing markscheme_text.")
             try:
                 mm = int(stp.get("max_marks", 0))
             except Exception:
                 mm = 0
             if mm <= 0 or mm > 12:
                 reasons.append(f"Step {i+1}: max_marks must be 1-12.")
-            ms = str(stp.get("markscheme_text", "") or "")
-            if f"TOTAL = {mm}" not in ms:
-                reasons.append(f"Step {i+1}: markscheme_text must end with 'TOTAL = {mm}'.")
-        return (len(reasons) == 0), reasons
 
-    def _call_model(repair: bool, reasons: Optional[List[str]] = None) -> Dict[str, Any]:
-        system = _render_template(JOURNEY_SYSTEM_TPL, {
-            "GCSE_ONLY_GUARDRAILS": GCSE_ONLY_GUARDRAILS,
-            "MARKDOWN_LATEX_RULES": MARKDOWN_LATEX_RULES,
-            "TRACK": st.session_state.get("track", TRACK_DEFAULT),
-        })
-        system = (system or "").strip()
+            ms_step = str(stp.get("markscheme_text", "") or "")
+            if mm > 0:
+                total = _extract_total_from_markscheme(ms_step)
+                if total != mm:
+                    reasons.append(f"WARN: Step {i+1}: markscheme_text total should equal {mm}.")
+            if not str(stp.get("markscheme_text", "")).strip():
+                reasons.append(f"WARN: Step {i+1}: missing markscheme_text.")
+        hard = [r for r in reasons if not str(r).startswith("WARN:")]
+        return (len(hard) == 0), reasons
 
-        emph_txt = ", ".join([f"{k}={int(v)}" for k, v in (emphasis or {}).items()])
+    def _repair_call(system_tpl: str, base_user: str, repair_prefix_tpl: str, reasons: List[str], extra: Dict[str, Any], max_tokens: int) -> Dict[str, Any]:
+        bullet_reasons = "\n".join([f"- {r}" for r in (reasons or [])]) or "- (unspecified)"
+        prefix = _render_template(repair_prefix_tpl, {
+            "BULLET_REASONS": bullet_reasons,
+            "STEPS_N": steps_n,
+            **(extra or {}),
+        }).strip()
+        user = (prefix + "\n\n" + (base_user or "").strip()).strip()
+        system = _render_system(system_tpl)
+        return _json_from_model(system, user, max_tokens=max_tokens)
 
-        base_user = _render_template(JOURNEY_USER_TPL, {
-            "TOPIC_PLAIN": (topic_plain_english or "").strip(),
-            "DURATION_MIN": int(duration_minutes),
-            "STEPS_N": int(steps_n),
-            "EMPHASIS_TXT": emph_txt,
-        })
-        base_user = (base_user or "").strip()
+    # ----------------------------
+    # Phase 1: Plan
+    # ----------------------------
+    emph_txt = ", ".join([f"{k}={int(v)}" for k, v in (emphasis or {}).items()])
+    plan_user = _render_template(JOURNEY_PLAN_USER_TPL, {
+        "TOPIC_PLAIN": topic_plain_english,
+        "DURATION_MIN": duration_minutes,
+        "STEPS_N": steps_n,
+        "EMPHASIS_TXT": emph_txt,
+        "CHECKPOINT_EVERY": JOURNEY_CHECKPOINT_EVERY,
+        "TRACK": track,
+    }).strip()
+    plan_system = _render_system(JOURNEY_PLAN_SYSTEM_TPL)
 
-        if not repair:
-            user = base_user
-        else:
-            bullet_reasons = "\n".join([f"- {r}" for r in (reasons or [])]) or "- (unspecified)"
-            user = _render_template(JOURNEY_REPAIR_PREFIX_TPL, {
-                "BULLET_REASONS": bullet_reasons,
-                "STEPS_N": int(steps_n),
-            })
-            user = (user or "").strip() + "\n\n" + base_user
+    plan_data: Dict[str, Any] = _json_from_model(plan_system, plan_user, max_tokens=1500)
+    ok_plan, plan_reasons = _validate_plan(plan_data)
+    if (not ok_plan) and JOURNEY_PLAN_REPAIR_PREFIX_TPL:
+        for _ in range(2):
+            plan_data = _repair_call(
+                system_tpl=JOURNEY_PLAN_SYSTEM_TPL,
+                base_user=plan_user,
+                repair_prefix_tpl=JOURNEY_PLAN_REPAIR_PREFIX_TPL,
+                reasons=plan_reasons,
+                extra={"STEPS_N": steps_n},
+                max_tokens=1500,
+            )
+            ok_plan, plan_reasons = _validate_plan(plan_data)
+            if ok_plan:
+                break
 
+    plan_warnings: List[str] = []
+    if not ok_plan:
+        plan_warnings.append("AI did not return a valid plan. Using a fallback plan.")
+        plan_warnings.extend(plan_reasons[:10] if plan_reasons else [])
+        plan_data = _build_fallback_plan()
 
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            max_completion_tokens=4000,
-            response_format={"type": "json_object"},
-        )
-        raw = response.choices[0].message.content or ""
-        return safe_parse_json(raw) or {}
+    plan_topic = str(plan_data.get("topic", "") or topic_plain_english).strip()
+    plan_markdown = str(plan_data.get("plan_markdown", "") or "").strip()
+    spec_alignment = plan_data.get("spec_alignment", []) or []
+    if not isinstance(spec_alignment, list):
+        spec_alignment = []
+    spec_alignment = [str(x).strip() for x in spec_alignment if str(x).strip()][:20]
+    checkpoint_every = int(plan_data.get("checkpoint_every", JOURNEY_CHECKPOINT_EVERY) or JOURNEY_CHECKPOINT_EVERY)
+    step_plan = plan_data.get("step_plan", []) or []
 
-    data = _call_model(repair=False)
-    ok, reasons = _validate(data)
-    if not ok:
-        data2 = _call_model(repair=True, reasons=reasons)
-        ok2, reasons2 = _validate(data2)
-        if ok2:
-            data = data2
-        else:
-            data = data2 if isinstance(data2, dict) and data2 else data
-            data["warnings"] = reasons2[:12]
+    # ----------------------------
+    # Phase 2: Steps (chunked)
+    # ----------------------------
+    steps_out: List[Dict[str, Any]] = []
+    warnings: List[str] = plan_warnings[:]
 
-    # Final clean-up / normalization (display-time normalization will still run)
-    steps = data.get("steps", [])
-    if not isinstance(steps, list):
-        steps = []
-    steps = steps[:steps_n]
-    for stp in steps:
-        if isinstance(stp, dict):
+    chunk_size = 1
+    for start_i in range(0, steps_n, chunk_size):
+        chunk_plan = step_plan[start_i:start_i + chunk_size]
+        expected_len = len(chunk_plan)
+
+        steps_user = _render_template(JOURNEY_STEPS_USER_TPL, {
+            "TOPIC_PLAIN": plan_topic,
+            "DURATION_MIN": duration_minutes,
+            "STEPS_N": steps_n,
+            "CHECKPOINT_EVERY": checkpoint_every,
+            "PLAN_MARKDOWN": plan_markdown,
+            "SPEC_ALIGNMENT": "\n".join([f"- {x}" for x in spec_alignment]) or "",
+            "STEP_PLAN_JSON": json.dumps(chunk_plan, ensure_ascii=False),
+            "STEP_INDEX_START": int(start_i + 1),
+            "STEP_INDEX_END": int(start_i + expected_len),
+            "TRACK": track,
+        }).strip()
+        steps_system = _render_system(JOURNEY_STEPS_SYSTEM_TPL)
+
+        chunk_data: Dict[str, Any] = _json_from_model(steps_system, steps_user, max_tokens=2200)
+        chunk_data = _normalize_steps_chunk(chunk_data, chunk_plan)
+        ok_chunk, chunk_reasons = _validate_steps_chunk(chunk_data, expected_len=expected_len)
+
+        if (not ok_chunk) and JOURNEY_STEPS_REPAIR_PREFIX_TPL:
+            for _ in range(2):
+                chunk_data = _repair_call(
+                    system_tpl=JOURNEY_STEPS_SYSTEM_TPL,
+                    base_user=steps_user,
+                    repair_prefix_tpl=JOURNEY_STEPS_REPAIR_PREFIX_TPL,
+                    reasons=chunk_reasons,
+                    extra={"EXPECTED_LEN": expected_len, "STEP_INDEX_START": start_i + 1, "STEP_INDEX_END": start_i + expected_len},
+                    max_tokens=2200,
+                )
+                chunk_data = _normalize_steps_chunk(chunk_data, chunk_plan)
+                ok_chunk, chunk_reasons = _validate_steps_chunk(chunk_data, expected_len=expected_len)
+                if ok_chunk:
+                    break
+
+        if not ok_chunk:
+            warnings.append(f"Chunk {start_i+1}-{start_i+expected_len} invalid.")
+            warnings.extend(chunk_reasons[:8] if chunk_reasons else [])
+            break
+
+        chunk_steps = chunk_data.get("steps", []) or []
+        for stp in chunk_steps:
+            if not isinstance(stp, dict):
+                continue
             stp["objective"] = str(stp.get("objective", "") or "").strip()
             stp["question_text"] = str(stp.get("question_text", "") or "").strip()
             stp["markscheme_text"] = str(stp.get("markscheme_text", "") or "").strip()
@@ -1917,19 +2134,65 @@ def generate_topic_journey_with_ai(
                 stp["max_marks"] = 1
             if not isinstance(stp.get("misconceptions", []), list):
                 stp["misconceptions"] = []
-            stp["misconceptions"] = [str(x).strip() for x in stp.get("misconceptions", []) if str(x).strip()][:6]
+            stp["misconceptions"] = [str(x).strip() for x in (stp.get("misconceptions", []) or []) if str(x).strip()][:6]
             if not isinstance(stp.get("spec_refs", []), list):
                 stp["spec_refs"] = []
-            stp["spec_refs"] = [str(x).strip() for x in stp.get("spec_refs", []) if str(x).strip()][:6]
+            stp["spec_refs"] = [str(x).strip() for x in (stp.get("spec_refs", []) or []) if str(x).strip()][:6]
+
+        steps_out.extend(chunk_steps)
+
+    if len(steps_out) != steps_n:
+        warnings.append(f"Generated {len(steps_out)} / {steps_n} steps. Journey may be incomplete.")
+
+    if not steps_out:
+        single_user = _render_template(JOURNEY_USER_TPL, {
+            "TOPIC_PLAIN": plan_topic,
+            "DURATION_MIN": duration_minutes,
+            "STEPS_N": steps_n,
+            "EMPHASIS_TXT": emph_txt,
+            "CHECKPOINT_EVERY": checkpoint_every,
+            "TRACK": track,
+        }).strip()
+        single_system = _render_system(JOURNEY_SYSTEM_TPL)
+        single_data: Dict[str, Any] = _json_from_model(single_system, single_user, max_tokens=3200)
+        if step_plan and isinstance(step_plan, list) and len(step_plan) == steps_n:
+            single_data = _normalize_steps_chunk(single_data, step_plan)
+        ok_single, single_reasons = _validate_steps_chunk(single_data, expected_len=steps_n)
+        if (not ok_single) and JOURNEY_REPAIR_PREFIX_TPL:
+            for _ in range(2):
+                single_data = _repair_call(
+                    system_tpl=JOURNEY_SYSTEM_TPL,
+                    base_user=single_user,
+                    repair_prefix_tpl=JOURNEY_REPAIR_PREFIX_TPL,
+                    reasons=single_reasons,
+                    extra={"STEPS_N": steps_n},
+                    max_tokens=3200,
+                )
+                if step_plan and isinstance(step_plan, list) and len(step_plan) == steps_n:
+                    single_data = _normalize_steps_chunk(single_data, step_plan)
+                ok_single, single_reasons = _validate_steps_chunk(single_data, expected_len=steps_n)
+                if ok_single:
+                    break
+
+        single_steps = single_data.get("steps", []) if isinstance(single_data, dict) else []
+        if isinstance(single_steps, list) and single_steps:
+            warnings.append("Fallback single-shot generation used for steps.")
+            steps_out = single_steps[:steps_n]
+            plan_topic = str(single_data.get("topic", plan_topic) or plan_topic).strip()
+            plan_markdown = str(single_data.get("plan_markdown", plan_markdown) or plan_markdown).strip()
+            spec_alignment = single_data.get("spec_alignment", spec_alignment) if isinstance(single_data, dict) else spec_alignment
+        else:
+            warnings.append("Fallback single-shot generation failed to produce steps.")
+            warnings.extend(single_reasons[:8] if single_reasons else [])
 
     return {
-        "topic": str(data.get("topic", "") or topic_plain_english).strip(),
-        "duration_minutes": int(duration_minutes),
-        "checkpoint_every": int(data.get("checkpoint_every", JOURNEY_CHECKPOINT_EVERY) or JOURNEY_CHECKPOINT_EVERY),
-        "plan_markdown": str(data.get("plan_markdown", "") or "").strip(),
-        "spec_alignment": [str(x).strip() for x in (data.get("spec_alignment", []) or []) if str(x).strip()][:20],
-        "steps": steps,
-        "warnings": [str(x) for x in (data.get("warnings", []) or [])][:12],
+        "topic": plan_topic,
+        "duration_minutes": duration_minutes,
+        "checkpoint_every": checkpoint_every,
+        "plan_markdown": plan_markdown,
+        "spec_alignment": spec_alignment,
+        "steps": steps_out[:steps_n],
+        "warnings": [str(x) for x in warnings][:12],
     }
 
 # ============================================================
