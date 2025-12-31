@@ -2276,6 +2276,7 @@ if nav == "🧑‍🎓 Student":
                                 st.session_state["canvas_key"] += 1
                                 st.session_state["last_canvas_image_data"] = None  # legacy
                                 st.session_state["last_canvas_image_data_single"] = None
+                                st.session_state["last_canvas_data_url_single"] = None
                                 st.session_state["last_canvas_image_data_journey"] = None
                                 st.session_state["last_canvas_data_url_journey"] = None
 
