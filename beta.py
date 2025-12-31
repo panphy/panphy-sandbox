@@ -384,6 +384,15 @@ JOURNEY_SYSTEM_TPL = str(SUBJECT_PROMPTS.get("journey_system", "") or "")
 JOURNEY_USER_TPL = str(SUBJECT_PROMPTS.get("journey_user", "") or "")
 JOURNEY_REPAIR_PREFIX_TPL = str(SUBJECT_PROMPTS.get("journey_repair_prefix", "") or "")
 
+# Strategy 2 (two-phase Topic Journey): plan first, then generate steps in chunks.
+JOURNEY_PLAN_SYSTEM_TPL = str(SUBJECT_PROMPTS.get("journey_plan_system", "") or JOURNEY_SYSTEM_TPL)
+JOURNEY_PLAN_USER_TPL = str(SUBJECT_PROMPTS.get("journey_plan_user", "") or JOURNEY_USER_TPL)
+JOURNEY_PLAN_REPAIR_PREFIX_TPL = str(SUBJECT_PROMPTS.get("journey_plan_repair_prefix", "") or JOURNEY_REPAIR_PREFIX_TPL)
+
+JOURNEY_STEPS_SYSTEM_TPL = str(SUBJECT_PROMPTS.get("journey_steps_system", "") or JOURNEY_SYSTEM_TPL)
+JOURNEY_STEPS_USER_TPL = str(SUBJECT_PROMPTS.get("journey_steps_user", "") or JOURNEY_USER_TPL)
+JOURNEY_STEPS_REPAIR_PREFIX_TPL = str(SUBJECT_PROMPTS.get("journey_steps_repair_prefix", "") or JOURNEY_REPAIR_PREFIX_TPL)
+
 FEEDBACK_SYSTEM_TPL = str(SUBJECT_PROMPTS.get("feedback_system", "") or "")
 
 # Initialize track selection (combined vs separate) early
@@ -517,6 +526,8 @@ _ss_init("last_canvas_image_data_single", None)
 _ss_init("last_canvas_image_data_journey", None)
 _ss_init("last_canvas_data_url_single", None)
 _ss_init("last_canvas_data_url_journey", None)
+_ss_init("canvas_store_single", {})   # qid -> data_url
+_ss_init("canvas_store_journey", {})  # (qid, step_i) -> data_url
 _ss_init("stylus_only_enabled", True)
 _ss_init("canvas_cmd_nonce_single", 0)
 _ss_init("canvas_cmd_nonce_journey", 0)
@@ -556,6 +567,58 @@ def data_url_to_image_data(data_url: str) -> np.ndarray:
     raw = base64.b64decode(b64)
     img = Image.open(io.BytesIO(raw)).convert("RGBA")
     return np.array(img)
+
+
+def _canvas_store_key_single(qid: Optional[int]) -> str:
+    return str(qid or "none")
+
+
+def _canvas_store_key_journey(qid: Optional[int], step_i: int) -> str:
+    return f"{qid or 'none'}::step{int(step_i)}"
+
+
+def get_stored_canvas_data_url_single(qid: Optional[int]) -> Optional[str]:
+    store = st.session_state.get("canvas_store_single", {}) or {}
+    if not isinstance(store, dict):
+        store = {}
+    return store.get(_canvas_store_key_single(qid)) or st.session_state.get("last_canvas_data_url_single")
+
+
+def set_stored_canvas_data_url_single(qid: Optional[int], data_url: Optional[str]) -> None:
+    store = st.session_state.get("canvas_store_single", {}) or {}
+    if not isinstance(store, dict):
+        store = {}
+    key = _canvas_store_key_single(qid)
+    if data_url:
+        store[key] = data_url
+        st.session_state["last_canvas_data_url_single"] = data_url
+    else:
+        store.pop(key, None)
+        if st.session_state.get("last_canvas_data_url_single") == data_url:
+            st.session_state["last_canvas_data_url_single"] = None
+    st.session_state["canvas_store_single"] = store
+
+
+def get_stored_canvas_data_url_journey(qid: Optional[int], step_i: int) -> Optional[str]:
+    store = st.session_state.get("canvas_store_journey", {}) or {}
+    if not isinstance(store, dict):
+        store = {}
+    return store.get(_canvas_store_key_journey(qid, step_i)) or get_stored_canvas_data_url_journey(qid, step_i)
+
+
+def set_stored_canvas_data_url_journey(qid: Optional[int], step_i: int, data_url: Optional[str]) -> None:
+    store = st.session_state.get("canvas_store_journey", {}) or {}
+    if not isinstance(store, dict):
+        store = {}
+    key = _canvas_store_key_journey(qid, step_i)
+    if data_url:
+        store[key] = data_url
+        st.session_state["last_canvas_data_url_journey"] = data_url
+    else:
+        store.pop(key, None)
+        if get_stored_canvas_data_url_journey(qid, step_i) == data_url:
+            st.session_state["last_canvas_data_url_journey"] = None
+    st.session_state["canvas_store_journey"] = store
 
 def _stylus_canvas_available() -> bool:
     return stylus_canvas is not None
@@ -1972,12 +2035,22 @@ def generate_topic_journey_with_ai(
     topic_plain_english: str,
     duration_minutes: int,
     emphasis: Dict[str, int],
+    track: Optional[str] = None,
 ) -> Dict[str, Any]:
-    steps_n = DURATION_TO_STEPS.get(int(duration_minutes), 8)
-    topic_plain_english = (topic_plain_english or "").strip()
+    """
+    Strategy 2: Two-phase Topic Journey generation.
+    Phase 1: Create a step plan (objectives, step types, marks, spec refs) for the full journey.
+    Phase 2: Generate steps in small chunks that strictly follow the plan.
 
+    Returns a dict compatible with the app's journey_json shape.
+    """
+    topic_plain_english = (topic_plain_english or "").strip()
+    duration_minutes = int(duration_minutes)
+    steps_n = int(DURATION_TO_STEPS.get(duration_minutes, 8))
+    track = (track or TRACK_DEFAULT or "combined").strip()
+
+    # Small deterministic fixes for AQA notation. Keep narrow and safe.
     def _apply_notation_fixes(text: str) -> str:
-        """Small deterministic fixes for AQA notation. Keep narrow and safe."""
         s = text or ""
         # Elastic energy store: use e for extension (AQA sheet)
         s = re.sub(r"\\frac\{1\}\{2\}\s*k\s*x\^2\b", r"\\frac{1}{2} k e^2", s)
@@ -1985,25 +2058,51 @@ def generate_topic_journey_with_ai(
         # Hooke's law: use e for extension (AQA sheet)
         s = re.sub(r"\bF\s*=\s*k\s*x\b", "F = k e", s)
         return s
-    def _validate(d: Dict[str, Any]) -> Tuple[bool, List[str]]:
+
+    def _json_from_model(system: str, user: str, max_tokens: int) -> Dict[str, Any]:
+        resp = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": (system or "").strip()},
+                {"role": "user", "content": (user or "").strip()},
+            ],
+            max_completion_tokens=int(max_tokens),
+            response_format={"type": "json_object"},
+        )
+        raw = ""
+        try:
+            raw = resp.choices[0].message.content or ""
+        except Exception:
+            raw = ""
+        raw = (raw or "").strip()
+        try:
+            return json.loads(raw) if raw else {}
+        except Exception:
+            # Last resort: extract the first JSON object
+            try:
+                m = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+                return json.loads(m.group(0)) if m else {}
+            except Exception:
+                return {}
+
+    def _render_system(tpl: str) -> str:
+        return _render_template(tpl, {
+            "GCSE_ONLY_GUARDRAILS": GCSE_ONLY_GUARDRAILS,
+            "MARKDOWN_LATEX_RULES": MARKDOWN_LATEX_RULES,
+            "EQUATION_SHEET": EQUATION_SHEET_TEXT,
+            "TRACK": track,
+        }).strip()
+
+    def _calc_requested(q: str) -> bool:
+        return bool(re.search(r"\bcalculate\b|\bwork\s+out\b|\bdetermine\b|\bfind\b", q or "", flags=re.IGNORECASE))
+
+    def _validate_steps_chunk(d: Dict[str, Any], expected_len: int) -> Tuple[bool, List[str]]:
         reasons: List[str] = []
         if not isinstance(d, dict):
             return False, ["Output is not a JSON object."]
-        if str(d.get("topic", "")).strip() == "":
-            reasons.append("Missing topic.")
         steps = d.get("steps", [])
-
-        # Apply narrow deterministic notation fixes to each step (AQA symbols)
-        try:
-            for stp in steps:
-                if isinstance(stp, dict):
-                    stp["question_text"] = _apply_notation_fixes(str(stp.get("question_text","") or ""))
-                    stp["markscheme_text"] = _apply_notation_fixes(str(stp.get("markscheme_text","") or ""))
-        except Exception:
-            pass
-
-        if not isinstance(steps, list) or len(steps) < steps_n:
-            reasons.append(f"steps must be a list with at least {steps_n} steps.")
+        if not isinstance(steps, list) or len(steps) != int(expected_len):
+            reasons.append(f"steps must be a list with exactly {int(expected_len)} steps.")
             return False, reasons
 
         for i, stp in enumerate(steps):
@@ -2022,18 +2121,17 @@ def generate_topic_journey_with_ai(
                 mm = 0
             if mm <= 0 or mm > 12:
                 reasons.append(f"Step {i+1}: max_marks must be 1-12.")
-            ms = str(stp.get("markscheme_text", "") or "")
 
-            # Enforce GCSE scope + AQA notation bans per step
+            # AQA notation + GCSE scope bans
             q_step = str(stp.get("question_text", "") or "")
-            bad = _forbidden_found(q_step, ms)
+            ms_step = str(stp.get("markscheme_text", "") or "")
+            bad = _forbidden_found(q_step, ms_step)
             for b in bad:
                 reasons.append(f"Step {i+1}: {b}")
 
-            # Calculation whitelist per step (only allowed AQA equations/derived relations)
-            calc_requested = bool(re.search(r"\bcalculate\b|\bwork\s*out\b|\bdetermine\b|\bcalculate\s+the\b", q_step, flags=re.IGNORECASE))
-            if calc_requested and EQUATION_ALLOWED_CALC_PATTERNS:
-                combined_text = q_step + "\n" + ms
+            # Calculation whitelist per step (equation sheet)
+            if _calc_requested(q_step) and EQUATION_ALLOWED_CALC_PATTERNS:
+                combined_text = q_step + "\n" + ms_step
                 ok_equation = False
                 for pat, _label in EQUATION_ALLOWED_CALC_PATTERNS:
                     try:
@@ -2043,108 +2141,195 @@ def generate_topic_journey_with_ai(
                     except re.error:
                         continue
                 if not ok_equation:
-                                        reasons.append(
-                        f"WARN: Step {i+1}: Calculation requested but no allowed AQA equation/derived relation detected. "
-                        "Include an equation from the AQA sheet or allowed relations; teacher may need to edit."
+                    reasons.append(
+                        f"WARN: Step {i+1}: Calculation requested but no allowed AQA equation/derived relation detected. Teacher may need to edit."
                     )
-            # TOTAL line: accept common variants like "TOTAL = 3" (not necessarily last line)
-            total_ok = bool(re.search(rf"TOTAL\s*=\s*{mm}\b", ms, flags=re.IGNORECASE))
-            if not total_ok:
-                reasons.append(f"Step {i+1}: markscheme_text must include a TOTAL line like 'TOTAL = {mm}'.")
+
+            # TOTAL line
+            if mm > 0:
+                total_ok = bool(re.search(rf"TOTAL\s*=\s*{mm}\b", ms_step, flags=re.IGNORECASE))
+                if not total_ok:
+                    reasons.append(f"Step {i+1}: markscheme_text must include a TOTAL line like 'TOTAL = {mm}'.")
+
         hard = [r for r in reasons if not str(r).startswith("WARN:")]
         return (len(hard) == 0), reasons
 
-    def _call_model(repair: bool, reasons: Optional[List[str]] = None) -> Dict[str, Any]:
-        system = _render_template(JOURNEY_SYSTEM_TPL, {
-            "GCSE_ONLY_GUARDRAILS": GCSE_ONLY_GUARDRAILS,
-            "MARKDOWN_LATEX_RULES": MARKDOWN_LATEX_RULES,
-            "EQUATION_SHEET": EQUATION_SHEET_TEXT,
-            "TRACK": st.session_state.get("track", TRACK_DEFAULT),
-        })
-        system = (system or "").strip()
+    def _validate_plan(d: Dict[str, Any]) -> Tuple[bool, List[str]]:
+        reasons: List[str] = []
+        if not isinstance(d, dict):
+            return False, ["Output is not a JSON object."]
+        sp = d.get("step_plan", [])
+        if not isinstance(sp, list) or len(sp) != steps_n:
+            reasons.append(f"step_plan must be a list with exactly {steps_n} items.")
+            return False, reasons
 
-        emph_txt = ", ".join([f"{k}={int(v)}" for k, v in (emphasis or {}).items()])
+        for i, it in enumerate(sp):
+            if not isinstance(it, dict):
+                reasons.append(f"step_plan[{i+1}] is not an object.")
+                continue
+            if not str(it.get("objective", "")).strip():
+                reasons.append(f"step_plan[{i+1}]: missing objective.")
+            if not str(it.get("step_type", "")).strip():
+                reasons.append(f"step_plan[{i+1}]: missing step_type.")
+            try:
+                mm = int(it.get("max_marks", 0))
+            except Exception:
+                mm = 0
+            if mm <= 0 or mm > 12:
+                reasons.append(f"step_plan[{i+1}]: max_marks must be 1-12.")
+            refs = it.get("spec_refs", [])
+            if refs is not None and (not isinstance(refs, list)):
+                reasons.append(f"step_plan[{i+1}]: spec_refs must be a list.")
+        return (len(reasons) == 0), reasons
 
-        base_user = _render_template(JOURNEY_USER_TPL, {
-            "TOPIC_PLAIN": (topic_plain_english or "").strip(),
-            "DURATION_MIN": int(duration_minutes),
-            "STEPS_N": int(steps_n),
-            "EMPHASIS_TXT": emph_txt,
-        })
-        base_user = (base_user or "").strip()
+    def _repair_call(system_tpl: str, base_user: str, repair_prefix_tpl: str, reasons: List[str], extra: Dict[str, Any], max_tokens: int) -> Dict[str, Any]:
+        bullet_reasons = "\n".join([f"- {r}" for r in (reasons or [])]) or "- (unspecified)"
+        prefix = _render_template(repair_prefix_tpl, {
+            "BULLET_REASONS": bullet_reasons,
+            "STEPS_N": steps_n,
+            **(extra or {}),
+        }).strip()
+        user = (prefix + "\n\n" + (base_user or "").strip()).strip()
+        system = _render_system(system_tpl)
+        return _json_from_model(system, user, max_tokens=max_tokens)
 
-        if not repair:
-            user = base_user
-        else:
-            bullet_reasons = "\n".join([f"- {r}" for r in (reasons or [])]) or "- (unspecified)"
-            user = _render_template(JOURNEY_REPAIR_PREFIX_TPL, {
-                "BULLET_REASONS": bullet_reasons,
-                "STEPS_N": int(steps_n),
-            })
-            user = (user or "").strip() + "\n\n" + base_user
+    # ----------------------------
+    # Phase 1: Plan
+    # ----------------------------
+    emph_txt = ", ".join([f"{k}={int(v)}" for k, v in (emphasis or {}).items()])
+    plan_user = _render_template(JOURNEY_PLAN_USER_TPL, {
+        "TOPIC_PLAIN": topic_plain_english,
+        "DURATION_MIN": duration_minutes,
+        "STEPS_N": steps_n,
+        "EMPHASIS_TXT": emph_txt,
+        "CHECKPOINT_EVERY": JOURNEY_CHECKPOINT_EVERY,
+        "TRACK": track,
+    }).strip()
+    plan_system = _render_system(JOURNEY_PLAN_SYSTEM_TPL)
 
+    plan_data: Dict[str, Any] = _json_from_model(plan_system, plan_user, max_tokens=1400)
+    ok_plan, plan_reasons = _validate_plan(plan_data)
+    if (not ok_plan) and JOURNEY_PLAN_REPAIR_PREFIX_TPL:
+        # Try up to 2 repairs
+        for _ in range(2):
+            plan_data = _repair_call(
+                system_tpl=JOURNEY_PLAN_SYSTEM_TPL,
+                base_user=plan_user,
+                repair_prefix_tpl=JOURNEY_PLAN_REPAIR_PREFIX_TPL,
+                reasons=plan_reasons,
+                extra={"STEPS_N": steps_n},
+                max_tokens=1400,
+            )
+            ok_plan, plan_reasons = _validate_plan(plan_data)
+            if ok_plan:
+                break
 
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            max_completion_tokens=4000,
-            response_format={"type": "json_object"},
-        )
-        raw = response.choices[0].message.content or ""
-        parsed = safe_parse_json(raw) or {}
-        if isinstance(parsed, dict):
-            parsed["_raw"] = raw
-        return parsed or {}
+    if not ok_plan:
+        return {
+            "topic": topic_plain_english,
+            "duration_minutes": duration_minutes,
+            "checkpoint_every": int(JOURNEY_CHECKPOINT_EVERY),
+            "plan_markdown": "",
+            "spec_alignment": [],
+            "steps": [],
+            "warnings": ["AI did not return a valid plan."] + (plan_reasons[:10] if plan_reasons else []),
+        }
 
-    data = _call_model(repair=False)
-    ok, reasons = _validate(data)
-    if not ok:
-        data2 = _call_model(repair=True, reasons=reasons)
-        ok2, reasons2 = _validate(data2)
-        if ok2:
-            data = data2
-        else:
-            data = data2 if isinstance(data2, dict) and data2 else data
-            data["warnings"] = reasons2[:12]
-            data["_validation_reasons"] = reasons2[:40]
+    # Normalize plan fields
+    plan_topic = str(plan_data.get("topic", "") or topic_plain_english).strip()
+    plan_markdown = str(plan_data.get("plan_markdown", "") or "").strip()
+    spec_alignment = plan_data.get("spec_alignment", []) or []
+    if not isinstance(spec_alignment, list):
+        spec_alignment = []
+    spec_alignment = [str(x).strip() for x in spec_alignment if str(x).strip()][:20]
+    checkpoint_every = int(plan_data.get("checkpoint_every", JOURNEY_CHECKPOINT_EVERY) or JOURNEY_CHECKPOINT_EVERY)
 
-    # Final clean-up / normalization (display-time normalization will still run)
-    steps = data.get("steps", [])
-    if not isinstance(steps, list):
-        steps = []
-    steps = steps[:steps_n]
-    for stp in steps:
-        if isinstance(stp, dict):
-            stp["objective"] = str(stp.get("objective", "") or "").strip()
-            stp["question_text"] = str(stp.get("question_text", "") or "").strip()
-            stp["markscheme_text"] = str(stp.get("markscheme_text", "") or "").strip()
+    step_plan = plan_data.get("step_plan", []) or []
+    # ----------------------------
+    # Phase 2: Steps (chunked)
+    # ----------------------------
+    steps_out: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+
+    chunk_size = 2  # tuned for reliability
+    for start_i in range(0, steps_n, chunk_size):
+        chunk_plan = step_plan[start_i:start_i + chunk_size]
+        expected_len = len(chunk_plan)
+
+        steps_user = _render_template(JOURNEY_STEPS_USER_TPL, {
+            "TOPIC_PLAIN": plan_topic,
+            "DURATION_MIN": duration_minutes,
+            "STEPS_N": steps_n,
+            "CHECKPOINT_EVERY": checkpoint_every,
+            "PLAN_MARKDOWN": plan_markdown,
+            "SPEC_ALIGNMENT": "\n".join([f"- {x}" for x in spec_alignment]) or "",
+            "STEP_PLAN_JSON": json.dumps(chunk_plan, ensure_ascii=False),
+            "STEP_INDEX_START": int(start_i + 1),
+            "STEP_INDEX_END": int(start_i + expected_len),
+            "TRACK": track,
+        }).strip()
+        steps_system = _render_system(JOURNEY_STEPS_SYSTEM_TPL)
+
+        chunk_data: Dict[str, Any] = _json_from_model(steps_system, steps_user, max_tokens=2200)
+        ok_chunk, chunk_reasons = _validate_steps_chunk(chunk_data, expected_len=expected_len)
+
+        if (not ok_chunk) and JOURNEY_STEPS_REPAIR_PREFIX_TPL:
+            for _ in range(2):
+                chunk_data = _repair_call(
+                    system_tpl=JOURNEY_STEPS_SYSTEM_TPL,
+                    base_user=steps_user,
+                    repair_prefix_tpl=JOURNEY_STEPS_REPAIR_PREFIX_TPL,
+                    reasons=chunk_reasons,
+                    extra={"EXPECTED_LEN": expected_len, "STEP_INDEX_START": start_i + 1, "STEP_INDEX_END": start_i + expected_len},
+                    max_tokens=2200,
+                )
+                ok_chunk, chunk_reasons = _validate_steps_chunk(chunk_data, expected_len=expected_len)
+                if ok_chunk:
+                    break
+
+        if not ok_chunk:
+            warnings.append(f"Chunk {start_i+1}-{start_i+expected_len} invalid.")
+            warnings.extend(chunk_reasons[:8] if chunk_reasons else [])
+            # Fail-fast: return a partial journey rather than an invalid one
+            break
+
+        chunk_steps = chunk_data.get("steps", []) or []
+        # Apply deterministic notation fixes + normalize small fields
+        for stp in chunk_steps:
+            if not isinstance(stp, dict):
+                continue
+            stp["question_text"] = _apply_notation_fixes(str(stp.get("question_text", "") or ""))
+            stp["markscheme_text"] = _apply_notation_fixes(str(stp.get("markscheme_text", "") or ""))
+
             try:
                 stp["max_marks"] = int(stp.get("max_marks", 1))
             except Exception:
                 stp["max_marks"] = 1
+
             if not isinstance(stp.get("misconceptions", []), list):
                 stp["misconceptions"] = []
-            stp["misconceptions"] = [str(x).strip() for x in stp.get("misconceptions", []) if str(x).strip()][:6]
+            stp["misconceptions"] = [str(x).strip() for x in (stp.get("misconceptions", []) or []) if str(x).strip()][:6]
+
             if not isinstance(stp.get("spec_refs", []), list):
                 stp["spec_refs"] = []
-            stp["spec_refs"] = [str(x).strip() for x in stp.get("spec_refs", []) if str(x).strip()][:6]
+            stp["spec_refs"] = [str(x).strip() for x in (stp.get("spec_refs", []) or []) if str(x).strip()][:6]
+
+        steps_out.extend(chunk_steps)
+
+    # Final sanity: enforce exact length
+    if len(steps_out) != steps_n:
+        warnings.append(f"Generated {len(steps_out)} / {steps_n} steps. Journey may be incomplete.")
 
     return {
-        "topic": str(data.get("topic", "") or topic_plain_english).strip(),
-        "duration_minutes": int(duration_minutes),
-        "checkpoint_every": int(data.get("checkpoint_every", JOURNEY_CHECKPOINT_EVERY) or JOURNEY_CHECKPOINT_EVERY),
-        "plan_markdown": str(data.get("plan_markdown", "") or "").strip(),
-        "spec_alignment": [str(x).strip() for x in (data.get("spec_alignment", []) or []) if str(x).strip()][:20],
-        "steps": steps,
-        "warnings": [str(x) for x in (data.get("warnings", []) or [])][:12],
+        "topic": plan_topic,
+        "duration_minutes": duration_minutes,
+        "checkpoint_every": checkpoint_every,
+        "plan_markdown": plan_markdown,
+        "spec_alignment": spec_alignment,
+        "steps": steps_out[:steps_n],
+        "warnings": [str(x) for x in warnings][:12],
     }
 
-# ============================================================
-# REPORT RENDERER
-# ============================================================
 def render_report(report: dict):
     readback_md = (report.get("readback_markdown") or "").strip()
     if readback_md:
@@ -2504,7 +2689,7 @@ if nav == "🧑‍🎓 Student":
                         cmd = "undo"
                     if clear_clicked:
                         st.session_state["feedback"] = None
-                        st.session_state["last_canvas_data_url_single"] = None
+                        set_stored_canvas_data_url_single(qid, None)
                         st.session_state["last_canvas_image_data_single"] = None
                         st.session_state["canvas_cmd_nonce_single"] = int(st.session_state.get("canvas_cmd_nonce_single", 0) or 0) + 1
                         cmd = "clear"
@@ -2522,10 +2707,11 @@ if nav == "🧑‍🎓 Student":
                         tool=("pen" if tool == "Pen" else "eraser"),
                         command=cmd,
                         command_nonce=int(st.session_state.get("canvas_cmd_nonce_single", 0) or 0),
+                        initial_data_url=get_stored_canvas_data_url_single(qid),
                         key=f"stylus_canvas_single_{qid or 'none'}_{st.session_state['canvas_key']}",
                     )
                     if isinstance(canvas_value, dict) and (not canvas_value.get("is_empty")) and canvas_value.get("data_url"):
-                        st.session_state["last_canvas_data_url_single"] = canvas_value.get("data_url")
+                        set_stored_canvas_data_url_single(qid, canvas_value.get("data_url"))
                 else:
                     tool_row = st.columns([2, 1])
                     with tool_row[0]:
@@ -2586,7 +2772,7 @@ if nav == "🧑‍🎓 Student":
                         except Exception:
                             data_url = None
                         if not data_url:
-                            data_url = st.session_state.get("last_canvas_data_url_single")
+                            data_url = get_stored_canvas_data_url_single(qid)
                         if data_url:
                             try:
                                 img_data = data_url_to_image_data(data_url)
@@ -2845,7 +3031,7 @@ if nav == "🧑‍🎓 Student":
                                 cmd = "undo"
                             if clear_clicked:
                                 st.session_state["feedback"] = None
-                                st.session_state["last_canvas_data_url_journey"] = None
+                                set_stored_canvas_data_url_journey(qid, step_i, None)
                                 st.session_state["last_canvas_image_data_journey"] = None
                                 st.session_state["canvas_cmd_nonce_journey"] = int(st.session_state.get("canvas_cmd_nonce_journey", 0) or 0) + 1
                                 cmd = "clear"
@@ -2863,10 +3049,11 @@ if nav == "🧑‍🎓 Student":
                                 tool=("pen" if tool == "Pen" else "eraser"),
                                 command=cmd,
                                 command_nonce=int(st.session_state.get("canvas_cmd_nonce_journey", 0) or 0),
+                                initial_data_url=get_stored_canvas_data_url_journey(qid, step_i),
                                 key=f"stylus_canvas_journey_{qid or 'none'}_{step_i}_{st.session_state['canvas_key']}",
                             )
                             if isinstance(canvas_value, dict) and (not canvas_value.get("is_empty")) and canvas_value.get("data_url"):
-                                st.session_state["last_canvas_data_url_journey"] = canvas_value.get("data_url")
+                                set_stored_canvas_data_url_journey(qid, step_i, canvas_value.get("data_url"))
                         else:
                             tool_row = st.columns([2, 1])
                             with tool_row[0]:
@@ -2926,7 +3113,7 @@ if nav == "🧑‍🎓 Student":
                                 except Exception:
                                     data_url = None
                                 if not data_url:
-                                    data_url = st.session_state.get("last_canvas_data_url_journey")
+                                    data_url = get_stored_canvas_data_url_journey(qid, step_i)
                                 if data_url:
                                     try:
                                         img_data = data_url_to_image_data(data_url)
@@ -3707,6 +3894,7 @@ else:
                                     topic_plain_english=j_topic.strip(),
                                     duration_minutes=int(j_duration),
                                     emphasis=emph,
+                                    track=st.session_state.get("track", TRACK_DEFAULT),
                                 )
 
                             data = _run_ai_with_progress(
