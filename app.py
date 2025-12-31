@@ -1482,16 +1482,18 @@ def insert_attempt(student_id: str, question_key: str, report: dict, mode: str, 
 
 
 @st.cache_data(ttl=20)
-def load_attempts_df_cached(_fp: str, limit: int = 5000) -> pd.DataFrame:
+def load_attempts_df_cached(_fp: str, subject_site: str, limit: int = 5000) -> pd.DataFrame:
     eng = get_db_engine()
     if eng is None:
         return pd.DataFrame()
     ensure_attempts_table()
+    subject_site = (subject_site or "").strip().lower() or SUBJECT_SITE
     with eng.connect() as conn:
         df = pd.read_sql(
             text("""
                 select created_at, student_id, question_key, mode, marks_awarded, max_marks, readback_type
                 from public.physics_attempts_v1
+                where subject_site = :subject_site
                 order by created_at desc
                 limit :limit
             """),
@@ -1507,7 +1509,7 @@ def load_attempts_df_cached(_fp: str, limit: int = 5000) -> pd.DataFrame:
 def load_attempts_df(limit: int = 5000) -> pd.DataFrame:
     fp = (st.secrets.get("DATABASE_URL", "") or "")[:40]
     try:
-        return load_attempts_df_cached(fp, limit=limit)
+        return load_attempts_df_cached(fp, subject_site=SUBJECT_SITE, limit=limit)
     except Exception as e:
         st.session_state["db_last_error"] = f"Load Error: {type(e).__name__}: {e}"
         return pd.DataFrame()
