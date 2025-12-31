@@ -7,7 +7,7 @@
     html, body {
       margin: 0;
       padding: 0;
-      background: transparent;
+      background: #f8f9fa;
       overflow: hidden;
       font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
     }
@@ -219,7 +219,8 @@
 
   // Keep iframe height in sync with the resizer height
   function syncFrameHeight() {
-    setFrameHeight(resizer.clientHeight);
+    // Use offsetHeight (includes borders) so the bottom border is not clipped.
+    setFrameHeight(resizer.offsetHeight);
   }
 
   // Resize observer for both:
@@ -236,7 +237,7 @@
   function applyArgs(newArgs) {
     args = Object.assign(args, newArgs || {});
     // apply background changes immediately (preserve content)
-    resizer.style.background = "transparent";
+    resizer.style.background = (args.background_color || "#f8f9fa");
     // initial height (only if not resized yet)
     const desiredH = Math.max(200, parseInt(args.canvas_height || args.height || 520, 10));
     if (!resizer.dataset.userResized) {
