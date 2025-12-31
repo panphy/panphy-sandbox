@@ -1834,25 +1834,6 @@ def generate_topic_journey_with_ai(
     steps_n = DURATION_TO_STEPS.get(int(duration_minutes), 8)
     track = (st.session_state.get("track", TRACK_DEFAULT) or "combined").strip()
 
-    def _extract_total_from_markscheme(ms: str) -> Optional[int]:
-        m = re.search(r"\btotal\b\s*[:=]\s*(\d+)\b", ms or "", flags=re.IGNORECASE)
-        if not m:
-            return None
-        try:
-            return int(m.group(1))
-        except Exception:
-            return None
-
-    def _normalize_total_line(ms: str, max_marks: int) -> str:
-        total_line = f"TOTAL = {int(max_marks)}"
-        if not str(ms or "").strip():
-            return total_line
-        total_re = re.compile(r"^\s*TOTAL\s*[:=]\s*\d+\s*(marks)?\s*$", flags=re.IGNORECASE)
-        kept_lines = [line for line in str(ms).splitlines() if not total_re.match(line)]
-        if kept_lines:
-            return ("\n".join(kept_lines).rstrip() + "\n" + total_line).strip()
-        return total_line
-
     def _json_from_model(system: str, user: str, max_tokens: int) -> Dict[str, Any]:
         resp = client.chat.completions.create(
             model=MODEL_NAME,
@@ -1906,82 +1887,6 @@ def generate_topic_journey_with_ai(
                 reasons.append(f"step_plan[{i+1}]: spec_refs must be a list.")
         return (len(reasons) == 0), reasons
 
-    def _build_fallback_plan() -> Dict[str, Any]:
-        emphasis_defaults = emphasis or {}
-        type_weights = [
-            ("recall", int(emphasis_defaults.get("recall", 1))),
-            ("reasoning", int(emphasis_defaults.get("explanation", emphasis_defaults.get("reasoning", 2)))),
-            ("calculation", int(emphasis_defaults.get("calculation", 2))),
-            ("graph", int(emphasis_defaults.get("graph", 1))),
-            ("practical", int(emphasis_defaults.get("practical", 1))),
-        ]
-        weighted_types = []
-        for t, w in type_weights:
-            weighted_types.extend([t] * max(1, w))
-        if not weighted_types:
-            weighted_types = ["recall", "reasoning", "calculation"]
-
-        step_plan = []
-        for i in range(steps_n):
-            step_type = weighted_types[i % len(weighted_types)]
-            max_marks = min(12, 2 + (i // 2))
-            step_plan.append({
-                "objective": f"Step {i + 1}: {step_type} practice on {topic_plain_english}",
-                "step_type": step_type,
-                "max_marks": max_marks,
-                "spec_refs": [],
-            })
-
-        plan_md = "\n".join([f"{i + 1}. {sp['objective']}" for i, sp in enumerate(step_plan)])
-        return {
-            "topic": topic_plain_english,
-            "duration_minutes": duration_minutes,
-            "checkpoint_every": int(JOURNEY_CHECKPOINT_EVERY),
-            "plan_markdown": plan_md,
-            "spec_alignment": [],
-            "step_plan": step_plan,
-        }
-
-    def _normalize_steps_chunk(d: Dict[str, Any], chunk_plan: List[Dict[str, Any]]) -> Dict[str, Any]:
-        if not isinstance(d, dict):
-            return d
-        steps = d.get("steps", [])
-        if not isinstance(steps, list):
-            return d
-
-        for i, stp in enumerate(steps):
-            if not isinstance(stp, dict):
-                continue
-            plan = chunk_plan[i] if i < len(chunk_plan) and isinstance(chunk_plan[i], dict) else {}
-            plan_obj = str(plan.get("objective", "") or "").strip()
-            if plan_obj:
-                stp["objective"] = plan_obj
-            plan_mm = plan.get("max_marks", stp.get("max_marks", 1))
-            try:
-                plan_mm = int(plan_mm)
-            except Exception:
-                plan_mm = 1
-            stp["max_marks"] = plan_mm
-            stp["question_text"] = str(stp.get("question_text", "") or "").strip()
-            stp["markscheme_text"] = str(stp.get("markscheme_text", "") or "").strip()
-            if stp["markscheme_text"] or stp["question_text"]:
-                stp["markscheme_text"] = _normalize_total_line(stp["markscheme_text"], plan_mm)
-
-            if not isinstance(stp.get("misconceptions", []), list):
-                stp["misconceptions"] = []
-            stp["misconceptions"] = [str(x).strip() for x in (stp.get("misconceptions", []) or []) if str(x).strip()][:6]
-
-            plan_refs = plan.get("spec_refs", []) if isinstance(plan, dict) else []
-            if not isinstance(stp.get("spec_refs", []), list):
-                stp["spec_refs"] = []
-            if not stp.get("spec_refs") and isinstance(plan_refs, list):
-                stp["spec_refs"] = [str(x).strip() for x in plan_refs if str(x).strip()][:6]
-            else:
-                stp["spec_refs"] = [str(x).strip() for x in (stp.get("spec_refs", []) or []) if str(x).strip()][:6]
-
-        d["steps"] = steps
-        return d
-
     def _validate_steps_chunk(d: Dict[str, Any], expected_len: int) -> Tuple[bool, List[str]]:
         reasons: List[str] = []
         if not isinstance(d, dict):
@@ -2008,13 +1913,15 @@ def generate_topic_journey_with_ai(
 
             ms_step = str(stp.get("markscheme_text", "") or "")
             if mm > 0:
-                total = _extract_total_from_markscheme(ms_step)
-                if total != mm:
-                    reasons.append(f"WARN: Step {i+1}: markscheme_text total should equal {mm}.")
-            if not str(stp.get("markscheme_text", "")).strip():
-                reasons.append(f"WARN: Step {i+1}: missing markscheme_text.")
-        hard = [r for r in reasons if not str(r).startswith("WARN:")]
-        return (len(hard) == 0), reasons
+                total_ok = bool(re.search(rf"TOTAL\s*=\s*{mm}\b", ms_step, flags=re.IGNORECASE))
+                if not total_ok:
+                    reasons.append(f"Step {i+1}: markscheme_text must include a TOTAL line like 'TOTAL = {mm}'.")
+
+            if not isinstance(stp.get("misconceptions", []), list):
+                reasons.append(f"Step {i+1}: misconceptions must be a list.")
+            if not isinstance(stp.get("spec_refs", []), list):
+                reasons.append(f"Step {i+1}: spec_refs must be a list.")
+        return (len(reasons) == 0), reasons
 
     def _repair_call(system_tpl: str, base_user: str, repair_prefix_tpl: str, reasons: List[str], extra: Dict[str, Any], max_tokens: int) -> Dict[str, Any]:
         bullet_reasons = "\n".join([f"- {r}" for r in (reasons or [])]) or "- (unspecified)"
@@ -2057,11 +1964,16 @@ def generate_topic_journey_with_ai(
             if ok_plan:
                 break
 
-    plan_warnings: List[str] = []
     if not ok_plan:
-        plan_warnings.append("AI did not return a valid plan. Using a fallback plan.")
-        plan_warnings.extend(plan_reasons[:10] if plan_reasons else [])
-        plan_data = _build_fallback_plan()
+        return {
+            "topic": topic_plain_english,
+            "duration_minutes": duration_minutes,
+            "checkpoint_every": int(JOURNEY_CHECKPOINT_EVERY),
+            "plan_markdown": "",
+            "spec_alignment": [],
+            "steps": [],
+            "warnings": ["AI did not return a valid plan."] + (plan_reasons[:10] if plan_reasons else []),
+        }
 
     plan_topic = str(plan_data.get("topic", "") or topic_plain_english).strip()
     plan_markdown = str(plan_data.get("plan_markdown", "") or "").strip()
@@ -2076,7 +1988,7 @@ def generate_topic_journey_with_ai(
     # Phase 2: Steps (chunked)
     # ----------------------------
     steps_out: List[Dict[str, Any]] = []
-    warnings: List[str] = plan_warnings[:]
+    warnings: List[str] = []
 
     chunk_size = 1
     for start_i in range(0, steps_n, chunk_size):
@@ -2098,7 +2010,6 @@ def generate_topic_journey_with_ai(
         steps_system = _render_system(JOURNEY_STEPS_SYSTEM_TPL)
 
         chunk_data: Dict[str, Any] = _json_from_model(steps_system, steps_user, max_tokens=2200)
-        chunk_data = _normalize_steps_chunk(chunk_data, chunk_plan)
         ok_chunk, chunk_reasons = _validate_steps_chunk(chunk_data, expected_len=expected_len)
 
         if (not ok_chunk) and JOURNEY_STEPS_REPAIR_PREFIX_TPL:
@@ -2111,7 +2022,6 @@ def generate_topic_journey_with_ai(
                     extra={"EXPECTED_LEN": expected_len, "STEP_INDEX_START": start_i + 1, "STEP_INDEX_END": start_i + expected_len},
                     max_tokens=2200,
                 )
-                chunk_data = _normalize_steps_chunk(chunk_data, chunk_plan)
                 ok_chunk, chunk_reasons = _validate_steps_chunk(chunk_data, expected_len=expected_len)
                 if ok_chunk:
                     break
@@ -2143,47 +2053,6 @@ def generate_topic_journey_with_ai(
 
     if len(steps_out) != steps_n:
         warnings.append(f"Generated {len(steps_out)} / {steps_n} steps. Journey may be incomplete.")
-
-    if not steps_out:
-        single_user = _render_template(JOURNEY_USER_TPL, {
-            "TOPIC_PLAIN": plan_topic,
-            "DURATION_MIN": duration_minutes,
-            "STEPS_N": steps_n,
-            "EMPHASIS_TXT": emph_txt,
-            "CHECKPOINT_EVERY": checkpoint_every,
-            "TRACK": track,
-        }).strip()
-        single_system = _render_system(JOURNEY_SYSTEM_TPL)
-        single_data: Dict[str, Any] = _json_from_model(single_system, single_user, max_tokens=3200)
-        if step_plan and isinstance(step_plan, list) and len(step_plan) == steps_n:
-            single_data = _normalize_steps_chunk(single_data, step_plan)
-        ok_single, single_reasons = _validate_steps_chunk(single_data, expected_len=steps_n)
-        if (not ok_single) and JOURNEY_REPAIR_PREFIX_TPL:
-            for _ in range(2):
-                single_data = _repair_call(
-                    system_tpl=JOURNEY_SYSTEM_TPL,
-                    base_user=single_user,
-                    repair_prefix_tpl=JOURNEY_REPAIR_PREFIX_TPL,
-                    reasons=single_reasons,
-                    extra={"STEPS_N": steps_n},
-                    max_tokens=3200,
-                )
-                if step_plan and isinstance(step_plan, list) and len(step_plan) == steps_n:
-                    single_data = _normalize_steps_chunk(single_data, step_plan)
-                ok_single, single_reasons = _validate_steps_chunk(single_data, expected_len=steps_n)
-                if ok_single:
-                    break
-
-        single_steps = single_data.get("steps", []) if isinstance(single_data, dict) else []
-        if isinstance(single_steps, list) and single_steps:
-            warnings.append("Fallback single-shot generation used for steps.")
-            steps_out = single_steps[:steps_n]
-            plan_topic = str(single_data.get("topic", plan_topic) or plan_topic).strip()
-            plan_markdown = str(single_data.get("plan_markdown", plan_markdown) or plan_markdown).strip()
-            spec_alignment = single_data.get("spec_alignment", spec_alignment) if isinstance(single_data, dict) else spec_alignment
-        else:
-            warnings.append("Fallback single-shot generation failed to produce steps.")
-            warnings.extend(single_reasons[:8] if single_reasons else [])
 
     return {
         "topic": plan_topic,
