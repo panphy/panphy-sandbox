@@ -81,8 +81,8 @@ st.set_page_config(
 # --- CONSTANTS ---
 # =========================
 MODEL_NAME = "gpt-5-mini"
-CANVAS_BG_HEX = "#f8f9fa"
-CANVAS_BG_RGB = (248, 249, 250)
+CANVAS_BG_HEX = "#F0F2F6"
+CANVAS_BG_RGB = (240, 242, 246)
 MAX_IMAGE_WIDTH = 1024
 
 STORAGE_BUCKET = "physics-bank"
@@ -177,8 +177,10 @@ def _persist_track_to_browser(track_value: str):
 def _inject_track_theme_css(track_value: str):
     """
     Streamlit theme.primaryColor is static, but we can strengthen the visual cue by
-    injecting a minimal CSS override for the primary accent color based on Track.
-    Kept intentionally small (no heavy layout CSS).
+    injecting a small CSS override for the primary accent color based on Track.
+
+    This targets both Streamlit CSS variables and BaseWeb components (tabs/buttons),
+    using high-specificity selectors and !important to win over injected styles.
     """
     track_value = (track_value or "").strip().lower()
     if track_value == "combined":
@@ -190,14 +192,42 @@ def _inject_track_theme_css(track_value: str):
         f"""
 <style>
 :root {{
+  --panphy-accent: {primary} !important;
   --primary-color: {primary} !important;
+  --primaryColor: {primary} !important;
 }}
-.stApp {{
+.stApp, [data-testid="stAppViewContainer"] {{
+  --panphy-accent: {primary} !important;
   --primary-color: {primary} !important;
+  --primaryColor: {primary} !important;
 }}
-/* Many Streamlit widgets pick up --primary-color via CSS vars; this nudges buttons/links too. */
+/* Links */
 a, a:visited {{
-  color: var(--primary-color) !important;
+  color: var(--panphy-accent) !important;
+}}
+
+/* Tabs (BaseWeb) */
+.stTabs [data-baseweb="tab"][aria-selected="true"] {{
+  color: var(--panphy-accent) !important;
+}}
+.stTabs [data-baseweb="tab-highlight"],
+.stTabs [data-baseweb="tab-border"] {{
+  background-color: var(--panphy-accent) !important;
+}}
+
+/* Primary buttons */
+button[data-testid="baseButton-primary"] {{
+  background-color: var(--panphy-accent) !important;
+  border-color: var(--panphy-accent) !important;
+}}
+button[data-testid="baseButton-primary"]:hover {{
+  filter: brightness(0.98);
+}}
+
+/* Checkbox/radio highlights (best-effort) */
+div[role="radiogroup"] input:checked + div,
+div[role="checkbox"] input:checked + div {{
+  border-color: var(--panphy-accent) !important;
 }}
 </style>
 """,
@@ -3423,20 +3453,55 @@ else:
 
                     gen_c1, gen_c2 = st.columns([2, 1])
                     with gen_c1:
-                        topic_mode = st.radio("Topic input", ["Choose from AQA list", "Describe a topic"], horizontal=True, key="topic_mode")
-                        if topic_mode == "Choose from AQA list":
-                            topic_choice = st.selectbox("AQA GCSE Physics topic", get_topic_names_for_track(st.session_state.get("track", TRACK_DEFAULT)), key="topic_choice", help="Topics shown depend on Combined/Separate selection.")
-                            topic_text = topic_choice
-                        else:
-                            topic_text = st.text_input("Describe the topic", placeholder="e.g. stopping distance with thinking vs braking distance", key="topic_text")
-                            free_text_separate_only = st.checkbox(
-                                "Separate-only (not for Combined)",
-                                value=False,
-                                key="gen_free_text_separate_only",
-                                help="Tick this if the topic/question you are describing includes Separate-only content. If unticked, it will be saved as eligible for both Combined + Separate.",
+                        # Topic selection (curated only, no free-text).
+                        if "gen_topic_count" not in st.session_state:
+                            st.session_state["gen_topic_count"] = 1
+
+                        available_topics = get_topic_names_filtered()
+                        if not available_topics:
+                            st.error("No topics available for the selected Track. Check topics.json.")
+                            st.stop()
+
+                        topic_rows = []
+                        for i in range(int(st.session_state["gen_topic_count"])):
+                            key = f"gen_topic_{i}"
+                            default_idx = 0
+                            if st.session_state.get(key) in available_topics:
+                                default_idx = available_topics.index(st.session_state.get(key))
+                            topic_rows.append(
+                                st.selectbox(
+                                    f"Topic {i+1}",
+                                    available_topics,
+                                    index=default_idx,
+                                    key=key,
+                                    help="Topics shown depend on Combined/Separate selection.",
+                                )
                             )
 
-                        qtype = st.selectbox("Question type", QUESTION_TYPES, key="gen_qtype")
+                        btn_c1, btn_c2 = st.columns([1, 1])
+                        with btn_c1:
+                            if st.button("Add a topic", use_container_width=True, key="gen_add_topic_btn"):
+                                st.session_state["gen_topic_count"] = min(int(st.session_state["gen_topic_count"]) + 1, 5)
+                                st.rerun()
+                        with btn_c2:
+                            if st.button(
+                                "Remove last topic",
+                                use_container_width=True,
+                                disabled=int(st.session_state["gen_topic_count"]) <= 1,
+                                key="gen_remove_topic_btn",
+                            ):
+                                removed_idx = int(st.session_state["gen_topic_count"]) - 1
+                                st.session_state["gen_topic_count"] = max(1, int(st.session_state["gen_topic_count"]) - 1)
+                                dead_key = f"gen_topic_{removed_idx}"
+                                if dead_key in st.session_state:
+                                    del st.session_state[dead_key]
+                                st.rerun()
+
+                        selected_topics = [t for t in topic_rows if t]
+                        topic_text = " + ".join(selected_topics)
+
+                        # Track eligibility derived from topic entries (if any selected topic is separate_only, treat the whole item as separate_only)
+                        draft_track_ok = jour_draft_track_okqtype = st.selectbox("Question type", QUESTION_TYPES, key="gen_qtype")
                         difficulty = st.selectbox("Difficulty", DIFFICULTIES, key="gen_difficulty")
                         marks_req = st.number_input("Max marks (target)", min_value=1, max_value=12, value=4, step=1, key="gen_marks")
 
@@ -3495,11 +3560,7 @@ else:
                                 else:
                                     token = pysecrets.token_hex(3)
                                     default_label = f"AI-{slugify(topic_text)[:24]}-{token}"
-                                    # Track eligibility for this draft
-                                    if topic_mode == "Choose from AQA list":
-                                        draft_track_ok = get_topic_track_ok(topic_text)
-                                    else:
-                                        draft_track_ok = "separate_only" if st.session_state.get("gen_free_text_separate_only") else "both"
+                                    # Track eligibility for this draft is derived from the selected topic(s) above (draft_track_ok).
 
                                     st.session_state["ai_draft"] = {
                                         "assignment_name": (assignment_name_ai or "").strip() or "AI Practice",
@@ -3579,17 +3640,55 @@ else:
 
                     jc1, jc2 = st.columns([2, 1])
                     with jc1:
-                        j_topic = st.text_input(
-                            "Topic in plain English",
-                            placeholder="e.g. Resistance and I-V characteristics (including filament lamp)",
-                            key="jour_topic"
-                        )
-                        journey_free_text_separate_only = st.checkbox(
-                            "Separate-only journey (not for Combined)",
-                            value=False,
-                            key="jour_free_text_separate_only",
-                            help="Tick this if the journey includes Separate-only content (e.g. Space physics). Unticked means eligible for both Combined + Separate.",
-                        )
+                        # Topic selection (curated only, no free-text).
+                        if "jour_topic_count" not in st.session_state:
+                            st.session_state["jour_topic_count"] = 1
+
+                        available_topics = get_topic_names_filtered()
+                        if not available_topics:
+                            st.error("No topics available for the selected Track. Check topics.json.")
+                            st.stop()
+
+                        jour_topic_rows = []
+                        for i in range(int(st.session_state["jour_topic_count"])):
+                            key = f"jour_topic_{i}"
+                            default_idx = 0
+                            if st.session_state.get(key) in available_topics:
+                                default_idx = available_topics.index(st.session_state.get(key))
+                            jour_topic_rows.append(
+                                st.selectbox(
+                                    f"Topic {i+1}",
+                                    available_topics,
+                                    index=default_idx,
+                                    key=key,
+                                    help="Topics shown depend on Combined/Separate selection.",
+                                )
+                            )
+
+                        btn_j1, btn_j2 = st.columns([1, 1])
+                        with btn_j1:
+                            if st.button("Add a topic", use_container_width=True, key="jour_add_topic_btn"):
+                                st.session_state["jour_topic_count"] = min(int(st.session_state["jour_topic_count"]) + 1, 5)
+                                st.rerun()
+                        with btn_j2:
+                            if st.button(
+                                "Remove last topic",
+                                use_container_width=True,
+                                disabled=int(st.session_state["jour_topic_count"]) <= 1,
+                                key="jour_remove_topic_btn",
+                            ):
+                                removed_idx = int(st.session_state["jour_topic_count"]) - 1
+                                st.session_state["jour_topic_count"] = max(1, int(st.session_state["jour_topic_count"]) - 1)
+                                dead_key = f"jour_topic_{removed_idx}"
+                                if dead_key in st.session_state:
+                                    del st.session_state[dead_key]
+                                st.rerun()
+
+                        selected_topics = [t for t in jour_topic_rows if t]
+                        j_topic = " + ".join(selected_topics)
+
+                        # Track eligibility for this journey derived from topic entries
+                        jour_draft_track_ok = "separate_only" if any(get_topic_track_ok(t) == "separate_only" for t in selected_topics) else "both"
                         j_duration = st.selectbox(
                             "Journey length (minutes)",
                             [10, 20, 30],
@@ -3654,8 +3753,8 @@ else:
                             data = _run_ai_with_progress(
                                 task_fn=task_journey,
                                 ctx={"teacher": True, "mode": "topic_journey"},
-                                typical_range="8-20 seconds",
-                                est_seconds=16.0
+                                typical_range="45-120 seconds",
+                                est_seconds=float(min(140.0, 30.0 + DURATION_TO_STEPS.get(int(j_duration), 8) * 10.0))
                             )
 
                             if not isinstance(data, dict) or not data.get("steps"):
@@ -3663,7 +3762,7 @@ else:
                             else:
                                 token = pysecrets.token_hex(3)
                                 default_label = f"JOURNEY-{slugify(j_topic)[:24]}-{token}"
-                                draft_track_ok = "separate_only" if st.session_state.get("jour_free_text_separate_only") else "both"
+                                draft_track_ok = jour_draft_track_ok
                                 st.session_state["journey_draft"] = {
                                     "assignment_name": (j_assignment or "").strip() or "Topic Journey",
                                     "question_label": default_label,
