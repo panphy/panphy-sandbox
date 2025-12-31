@@ -1,0 +1,45 @@
+{
+  "schema_version": "1.0",
+  "subject_site": "physics",
+  "exam_board": "AQA",
+  "tier": "Higher",
+  "preferred_equations": [
+    {
+      "name": "Hooke's law (spring)",
+      "latex": "F = k e",
+      "notes": "use e for extension (m)"
+    },
+    {
+      "name": "Elastic potential energy (spring)",
+      "latex": "E = \\frac{1}{2} k e^2",
+      "notes": "use e for extension (m)"
+    },
+    {
+      "name": "Hubble's law",
+      "latex": "v = H_0 d",
+      "notes": "Space physics calculation allowed at GCSE"
+    }
+  ],
+  "banned_concepts": [
+    {
+      "pattern": "\\bz\\s*=\\s*(?:\\\\Delta|Δ)\\s*\\\\?lambda\\s*/\\s*\\\\?lambda\\b|\\bΔ\\s*λ\\s*/\\s*λ\\b",
+      "reason": "Redshift fraction calculation z=Δλ/λ is not required for AQA GCSE Physics."
+    },
+    {
+      "pattern": "\\b(lambda_obs|lambda_emit|λ_obs|λ_emit)\\b",
+      "reason": "λ_obs/λ_emit notation for redshift calculations is not required for AQA GCSE Physics."
+    },
+    {
+      "pattern": "\\bF\\s*=\\s*k\\s*x\\b",
+      "reason": "Use AQA equation sheet notation F = k e (extension e), not F=kx."
+    },
+    {
+      "pattern": "\\bE\\s*=\\s*\\(?\\s*1\\s*/\\s*2\\s*\\)?\\s*k\\s*x\\s*\\^\\s*2\\b|\\\\frac\\{1\\}\\{2\\}\\s*k\\s*x\\^2",
+      "reason": "Use AQA notation E = 1/2 k e^2, not with x."
+    }
+  ],
+  "notes": [
+    "This file is a lightweight guardrail pack, not a full official equation sheet.",
+    "You can extend preferred_equations and banned_concepts over time as you spot more symbol/GCSE-scope issues."
+  ]
+}
