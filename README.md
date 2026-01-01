@@ -26,6 +26,11 @@ Students can:
 
 While the AI is working, the UI is locked with a translucent overlay and a progress bar to prevent accidental changes.
 
+### Question quality safeguards
+To improve consistency and correctness in AI-generated questions, the app enforces:
+- **Equation whitelist**: Only approved equations are used in question generation, keeping problems aligned with the GCSE Physics specification.
+- **LLM self-checking**: The model performs an internal validation pass to catch errors, verify working, and improve clarity before a question is saved.
+
 ### Teacher view
 Teachers can:
 - Browse and preview the question bank (AI + teacher uploads)
