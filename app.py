@@ -3224,6 +3224,9 @@ elif nav == "🔒 Teacher Dashboard":
                     if df_del.empty:
                         st.info("No attempts available for deletion.")
                     else:
+                        def _request_attempt_delete():
+                            st.session_state["attempt_delete_requested"] = True
+
                         def _fmt_attempt(r):
                             created_at = str(r.get("created_at", "") or "")
                             student_id = str(r.get("student_id", "") or "")
@@ -3240,6 +3243,25 @@ elif nav == "🔒 Teacher Dashboard":
                             return f"{created_at} | {student_id} | {question_key} | {mode} | {marks} [id {aid}]"
 
                         df_del["label"] = df_del.apply(_fmt_attempt, axis=1)
+                        delete_status = None
+                        if st.session_state.get("attempt_delete_requested"):
+                            attempt_picks = st.session_state.get("attempt_delete_picks", [])
+                            confirm_delete = st.session_state.get("confirm_delete_attempt", False)
+                            if confirm_delete and attempt_picks:
+                                delete_ok = True
+                                for attempt_pick in attempt_picks:
+                                    attempt_id = int(df_del.loc[df_del["label"] == attempt_pick, "id"].iloc[0])
+                                    delete_ok = delete_attempt_by_id(attempt_id) and delete_ok
+                                if delete_ok:
+                                    delete_status = "success"
+                                    st.session_state["attempt_delete_picks"] = []
+                                    st.session_state["confirm_delete_attempt"] = False
+                                else:
+                                    delete_status = "failed"
+                            else:
+                                delete_status = "missing"
+                            st.session_state["attempt_delete_requested"] = False
+
                         attempt_picks = st.multiselect(
                             "Select attempts to delete",
                             df_del["label"].tolist(),
@@ -3255,18 +3277,16 @@ elif nav == "🔒 Teacher Dashboard":
                             use_container_width=True,
                             disabled=not (confirm_delete and attempt_picks),
                             key="delete_attempt_btn",
+                            on_click=_request_attempt_delete,
                         ):
-                            delete_ok = True
-                            for attempt_pick in attempt_picks:
-                                attempt_id = int(df_del.loc[df_del["label"] == attempt_pick, "id"].iloc[0])
-                                delete_ok = delete_attempt_by_id(attempt_id) and delete_ok
-                            if delete_ok:
-                                st.success("Attempt(s) deleted.")
-                                st.session_state["attempt_delete_picks"] = []
-                                st.session_state["confirm_delete_attempt"] = False
-                                st.rerun()
-                            else:
-                                st.error("Delete failed. Check database errors above.")
+                            pass
+                        if delete_status == "success":
+                            st.success("Attempt(s) deleted.")
+                            st.rerun()
+                        elif delete_status == "failed":
+                            st.error("Delete failed. Check database errors above.")
+                        elif delete_status == "missing":
+                            st.warning("Select attempts and confirm deletion to proceed.")
         else:
             st.caption("Enter the teacher password to view analytics.")
 
