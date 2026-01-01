@@ -3851,7 +3851,7 @@ else:
                 gen_mode = st.radio("Generator", ["Single question", "Topic Journey"], horizontal=True, key="gen_mode")
 
                 if gen_mode == "Single question":
-                    st.caption("Generate a single GCSE Higher question + mark scheme. You must vet and edit before saving.")
+                    st.caption("Generate a single GCSE Higher question + mark scheme. You must vet and can edit before saving.")
 
                     gen_c1, gen_c2 = st.columns([2, 1])
                     with gen_c1:
@@ -4004,7 +4004,7 @@ else:
                                     st.error("Failed to save to database. Check errors below.")
 
                 else:
-                    st.caption("Generate a step-by-step Topic Journey (one saved object). You must vet and edit before saving.")
+                    st.caption("Generate a step-by-step Topic Journey for the selected topic. You must vet and can edit before saving.")
 
                     jc1, jc2 = st.columns([2, 1])
 
