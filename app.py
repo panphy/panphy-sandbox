@@ -3462,24 +3462,6 @@ elif nav == "🔒 Teacher Dashboard":
     st.divider()
     st.subheader("🔒 Teacher Dashboard")
 
-    with st.expander("Database tools"):
-        if st.button("Reconnect to database", key="reconnect_db_teacher"):
-            _cached_engine.clear()
-            try:
-                load_attempts_df_cached.clear()
-                load_question_bank_df_cached.clear()
-                load_question_by_id_cached.clear()
-            except Exception:
-                pass
-            st.session_state["db_table_ready"] = False
-            st.session_state["bank_table_ready"] = False
-            st.session_state["cached_q_row"] = None
-            st.session_state["selected_qid"] = None
-            st.rerun()
-        if st.session_state.get("db_last_error"):
-            st.write("Last DB error:")
-            st.code(st.session_state["db_last_error"])
-
     if not (st.secrets.get("DATABASE_URL", "") or "").strip():
         st.info("Database not configured in secrets.")
     elif not db_ready():
@@ -3620,23 +3602,6 @@ else:
     )
     st.session_state["teacher_track_ok"] = "both" if _tt_label.startswith("Both") else "separate_only"
 
-
-    with st.expander("Database tools"):
-        if st.button("Reconnect to database", key="reconnect_db_bank"):
-            _cached_engine.clear()
-            try:
-                load_question_bank_df_cached.clear()
-                load_question_by_id_cached.clear()
-                cached_download_from_storage.clear()
-            except Exception:
-                pass
-            st.session_state["db_table_ready"] = False
-            st.session_state["bank_table_ready"] = False
-            st.session_state["ai_draft"] = None
-            st.rerun()
-        if st.session_state.get("db_last_error"):
-            st.write("Last DB error:")
-            st.code(st.session_state["db_last_error"])
 
     if not db_ready():
         st.error("Database not ready. Configure DATABASE_URL first.")
@@ -4073,7 +4038,6 @@ else:
                         j_duration = 10
                         st.caption("Journey length is fixed: 10 minutes, 5 steps.")
 
-                        st.caption("Focus is chosen automatically based on the selected topic.")
                         j_assignment = st.text_input("Assignment name for saving", value="Topic Journey", key="jour_assignment")
                         j_tags = st.text_input("Tags (comma separated)", value="", key="jour_tags")
 
