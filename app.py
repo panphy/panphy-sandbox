@@ -2099,6 +2099,83 @@ Mark scheme:
     return []
 
 
+def _extract_total_from_marksheme(ms: str) -> Optional[int]:
+    m = re.search(r"\btotal\b\s*[:=]\s*(\d+)\b", ms or "", flags=re.IGNORECASE)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except Exception:
+        return None
+
+
+def _has_part_marking(ms: str) -> bool:
+    s = ms or ""
+    return bool(re.search(r"(\([a-z]\)|\b[a-z]\))\s.*\[\s*\d+\s*\]", s, flags=re.IGNORECASE | re.DOTALL))
+
+
+def _forbidden_found(q: str, ms: str) -> List[str]:
+    t = (q or "") + "\n" + (ms or "")
+    bad = []
+    patterns = [
+        (r"\\mu_0|\bmu0\b|\bμ0\b", "Uses μ0 (not GCSE)"),
+        (r"\\epsilon_0|\bepsilon0\b|\bε0\b", "Uses ε0 (not GCSE)"),
+        (r"\bB\s*=\s*\\mu_0\s*n\s*I\b|\bB\s*=\s*μ0\s*n\s*I\b", "Uses solenoid field equation B=μ0 n I (not GCSE)"),
+        (r"\bflux\b|\bflux linkage\b|\binductance\b", "Uses flux/inductance language (not GCSE here)"),
+        (r"\bFaraday\b|\bLenz\b", "Uses Faraday/Lenz law (not GCSE equation form here)"),
+        (r"\bcalculus\b|\bdifferentiat|\bintegrat", "Uses calculus (not GCSE)"),            (r"\bz\s*=\s*(\\Delta|Δ)\s*\\lambda\s*/\s*\\lambda|\bz\s*=\s*(delta|Δ)\s*lambda\s*/\s*lambda|Δ\s*λ\s*/\s*λ|Δ\s*lambda\s*/\s*lambda", "Uses red-shift calculation z=Δλ/λ (not required at AQA GCSE; red-shift is qualitative)"),
+        (r"\\frac\{1\}\{2\}\s*k\s*x\s*\^\s*2|\b0\.5\s*k\s*x\s*\^\s*2\b|\b1\s*/\s*2\s*k\s*x\s*\^\s*2\b|\bk\s*x\s*\^\s*2\b", "Uses elastic potential energy with x: use AQA notation Ee = 1/2 k e^2 (extension e)"),
+        (r"\bF\s*=\s*k\s*x\b|\bF\s*=\s*kx\b", "Uses Hooke’s law with x: use AQA notation F = k e (extension e)"),
+
+    ]
+    # Add subject-pack forbidden patterns (equations.json), if provided
+    try:
+        fps = SUBJECT_EQUATIONS.get("forbidden_patterns") or []
+        for fp in fps:
+            if isinstance(fp, dict):
+                rx = str(fp.get("regex", "") or "").strip()
+                rs = str(fp.get("reason", "") or "").strip()
+                if rx and rs:
+                    patterns.append((rx, rs))
+    except Exception:
+        pass
+
+    for pat, label in patterns:
+        if re.search(pat, t, flags=re.IGNORECASE):
+            bad.append(label)
+    return bad
+
+
+def _auto_check_warnings(question_text: str, markscheme_text: str, max_marks: int) -> List[str]:
+    reasons: List[str] = []
+    qtxt = str(question_text or "").strip()
+    mstxt = str(markscheme_text or "").strip()
+
+    if not qtxt:
+        reasons.append("Missing question_text.")
+    if not mstxt:
+        reasons.append("Missing markscheme_text.")
+
+    total = _extract_total_from_marksheme(mstxt)
+    if total != int(max_marks):
+        reasons.append(f"Mark scheme TOTAL must equal {int(max_marks)}.")
+
+    if not _has_part_marking(mstxt):
+        reasons.append("Mark scheme must include part-by-part marks like '(a) ... [2]'.")
+
+    reasons.extend(_forbidden_found(qtxt, mstxt))
+
+    non_whitelisted = _find_non_whitelisted_equations(f"{qtxt}\n{mstxt}")
+    if non_whitelisted:
+        offending = ", ".join(sorted(set(non_whitelisted)))
+        reasons.append(f"Contains non-whitelisted equations: {offending}")
+
+    if "$" in qtxt and "\\(" in qtxt:
+        reasons.append("Use $...$ for LaTeX, avoid \\(...\\).")
+
+    return reasons
+
+
 def generate_practice_question_with_ai(
     topic_text: str,
     difficulty: str,
@@ -2106,59 +2183,10 @@ def generate_practice_question_with_ai(
     marks: int,
     extra_instructions: str = "",
 ) -> Dict[str, Any]:
-    def _extract_total_from_marksheme(ms: str) -> Optional[int]:
-        m = re.search(r"\btotal\b\s*[:=]\s*(\d+)\b", ms or "", flags=re.IGNORECASE)
-        if not m:
-            return None
-        try:
-            return int(m.group(1))
-        except Exception:
-            return None
-
-    def _has_part_marking(ms: str) -> bool:
-        s = ms or ""
-        return bool(re.search(r"(\([a-z]\)|\b[a-z]\))\s.*\[\s*\d+\s*\]", s, flags=re.IGNORECASE | re.DOTALL))
-
-    def _forbidden_found(q: str, ms: str) -> List[str]:
-        t = (q or "") + "\n" + (ms or "")
-        bad = []
-        patterns = [
-            (r"\\mu_0|\bmu0\b|\bμ0\b", "Uses μ0 (not GCSE)"),
-            (r"\\epsilon_0|\bepsilon0\b|\bε0\b", "Uses ε0 (not GCSE)"),
-            (r"\bB\s*=\s*\\mu_0\s*n\s*I\b|\bB\s*=\s*μ0\s*n\s*I\b", "Uses solenoid field equation B=μ0 n I (not GCSE)"),
-            (r"\bflux\b|\bflux linkage\b|\binductance\b", "Uses flux/inductance language (not GCSE here)"),
-            (r"\bFaraday\b|\bLenz\b", "Uses Faraday/Lenz law (not GCSE equation form here)"),
-            (r"\bcalculus\b|\bdifferentiat|\bintegrat", "Uses calculus (not GCSE)"),            (r"\bz\s*=\s*(\\Delta|Δ)\s*\\lambda\s*/\s*\\lambda|\bz\s*=\s*(delta|Δ)\s*lambda\s*/\s*lambda|Δ\s*λ\s*/\s*λ|Δ\s*lambda\s*/\s*lambda", "Uses red-shift calculation z=Δλ/λ (not required at AQA GCSE; red-shift is qualitative)"),
-            (r"\\frac\{1\}\{2\}\s*k\s*x\s*\^\s*2|\b0\.5\s*k\s*x\s*\^\s*2\b|\b1\s*/\s*2\s*k\s*x\s*\^\s*2\b|\bk\s*x\s*\^\s*2\b", "Uses elastic potential energy with x: use AQA notation Ee = 1/2 k e^2 (extension e)"),
-            (r"\bF\s*=\s*k\s*x\b|\bF\s*=\s*kx\b", "Uses Hooke’s law with x: use AQA notation F = k e (extension e)"),
-
-        ]
-        # Add subject-pack forbidden patterns (equations.json), if provided
-        try:
-            fps = SUBJECT_EQUATIONS.get("forbidden_patterns") or []
-            for fp in fps:
-                if isinstance(fp, dict):
-                    rx = str(fp.get("regex", "") or "").strip()
-                    rs = str(fp.get("reason", "") or "").strip()
-                    if rx and rs:
-                        patterns.append((rx, rs))
-        except Exception:
-            pass
-
-        for pat, label in patterns:
-            if re.search(pat, t, flags=re.IGNORECASE):
-                bad.append(label)
-        return bad
-
     def _validate(d: Dict[str, Any]) -> Tuple[bool, List[str]]:
-        reasons: List[str] = []
-        qtxt = str(d.get("question_text", "") or "").strip()
-        mstxt = str(d.get("markscheme_text", "") or "").strip()
-
-        if not qtxt:
-            reasons.append("Missing question_text.")
-        if not mstxt:
-            reasons.append("Missing markscheme_text.")
+        qtxt = str(d.get("question_text", "") or "")
+        mstxt = str(d.get("markscheme_text", "") or "")
+        reasons = _auto_check_warnings(qtxt, mstxt, int(marks))
 
         mm = d.get("max_marks", None)
         try:
@@ -2167,24 +2195,6 @@ def generate_practice_question_with_ai(
             mm_int = None
         if mm_int != int(marks):
             reasons.append(f"max_marks must equal {int(marks)}.")
-
-        total = _extract_total_from_marksheme(mstxt)
-        if total != int(marks):
-            reasons.append(f"Mark scheme TOTAL must equal {int(marks)}.")
-
-        if not _has_part_marking(mstxt):
-            reasons.append("Mark scheme must include part-by-part marks like '(a) ... [2]'.")
-
-        bad = _forbidden_found(qtxt, mstxt)
-        reasons.extend(bad)
-
-        non_whitelisted = _find_non_whitelisted_equations(f"{qtxt}\n{mstxt}")
-        if non_whitelisted:
-            offending = ", ".join(sorted(set(non_whitelisted)))
-            reasons.append(f"Contains non-whitelisted equations: {offending}")
-
-        if "$" in qtxt and "\\(" in qtxt:
-            reasons.append("Use $...$ for LaTeX, avoid \\(...\\).")
 
         # Subject-pack forbidden patterns (equations.json): reject out-of-scope content early
         try:
@@ -3949,9 +3959,6 @@ else:
 
                     if st.session_state.get("ai_draft"):
                         d = st.session_state["ai_draft"]
-
-                        if d.get("warnings"):
-                            st.warning("AI draft warnings (auto-check):\n\n" + "\n".join([f"- {w}" for w in d["warnings"]]))
                         st.write("### ✅ Vet and edit the draft (Markdown + LaTeX supported)")
                         ed1, ed2 = st.columns([2, 1])
                         with ed1:
@@ -3973,6 +3980,10 @@ else:
                             render_md_box("Preview: Question (student view)", d_qtext, empty_text="No question text.")
                         with p2:
                             render_md_box("Preview: Mark scheme (teacher only)", d_mstext, empty_text="No mark scheme.")
+
+                        live_warnings = _auto_check_warnings(d_qtext, d_mstext, int(d_marks))
+                        if live_warnings:
+                            st.warning("AI draft warnings (auto-check):\n\n" + "\n".join([f"- {w}" for w in live_warnings]))
 
                         if approve_clicked:
                             if not d_assignment.strip() or not d_label.strip():
