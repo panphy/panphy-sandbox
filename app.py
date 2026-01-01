@@ -2589,10 +2589,10 @@ if nav == "🧑‍🎓 Student":
     # -------------------------
     with col1:
         if not q_row:
-            st.subheader("📝 The Question")
+            st.subheader("📝 Question")
             st.info("Select a question above to begin.")
         elif q_type != "journey":
-            st.subheader("📝 The Question")
+            st.subheader("📝 Question")
             max_marks = int(q_row.get("max_marks", 1))
             q_text = (q_row.get("question_text") or "").strip()
 
