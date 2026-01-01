@@ -2721,7 +2721,7 @@ if nav == "🧑‍🎓 Student":
 
             with st.container(border=True):
                 if question_img is not None:
-                    st.image(question_img, caption="Question image", use_container_width=True)
+                    st.image(question_img, caption="Question image", width='stretch')
                 if q_text:
                     st.markdown(normalize_markdown_math(q_text))
                 if (question_img is None) and (not q_text):
@@ -2844,8 +2844,8 @@ if nav == "🧑‍🎓 Student":
                             help="Best on iPad. When enabled, finger/palm touches are ignored.",
                             key="stylus_only_enabled",
                         )
-                    undo_clicked = tool_row[2].button("↩️ Undo", use_container_width=True, key="canvas_undo_single")
-                    clear_clicked = tool_row[3].button("🗑️ Clear", use_container_width=True, key="canvas_clear_single")
+                    undo_clicked = tool_row[2].button("↩️ Undo", width='stretch', key="canvas_undo_single")
+                    clear_clicked = tool_row[3].button("🗑️ Clear", width='stretch', key="canvas_clear_single")
                     cmd = None
                     if undo_clicked:
                         st.session_state["feedback"] = None
@@ -2887,7 +2887,7 @@ if nav == "🧑‍🎓 Student":
                             label_visibility="collapsed",
                             key="canvas_tool_single",
                         )
-                    clear_clicked = tool_row[1].button("🗑️ Clear", use_container_width=True, key="canvas_clear_single")
+                    clear_clicked = tool_row[1].button("🗑️ Clear", width='stretch', key="canvas_clear_single")
                     if clear_clicked:
                         st.session_state["feedback"] = None
                         st.session_state["last_canvas_image_data_single"] = None
@@ -3215,8 +3215,8 @@ if nav == "🧑‍🎓 Student":
                                     help="Best on iPad. When enabled, finger/palm touches are ignored.",
                                     key="stylus_only_enabled",
                                 )
-                            undo_clicked = tool_row[2].button("↩️ Undo", use_container_width=True, key="canvas_undo_journey")
-                            clear_clicked = tool_row[3].button("🗑️ Clear", use_container_width=True, key="canvas_clear_journey")
+                            undo_clicked = tool_row[2].button("↩️ Undo", width='stretch', key="canvas_undo_journey")
+                            clear_clicked = tool_row[3].button("🗑️ Clear", width='stretch', key="canvas_clear_journey")
                             cmd = None
                             if undo_clicked:
                                 st.session_state["feedback"] = None
@@ -3258,7 +3258,7 @@ if nav == "🧑‍🎓 Student":
                                     label_visibility="collapsed",
                                     key="canvas_tool_journey",
                                 )
-                            clear_clicked = tool_row[1].button("🗑️ Clear", use_container_width=True, key="canvas_clear_journey")
+                            clear_clicked = tool_row[1].button("🗑️ Clear", width='stretch', key="canvas_clear_journey")
                             if clear_clicked:
                                 st.session_state["feedback"] = None
                                 st.session_state["last_canvas_image_data_journey"] = None
@@ -3433,13 +3433,13 @@ if nav == "🧑‍🎓 Student":
 
                     cbtn1, cbtn2 = st.columns(2)
                     with cbtn1:
-                        st.button("Redo this step", use_container_width=True, key="journey_redo", on_click=_journey_redo_cb)
+                        st.button("Redo this step", width='stretch', key="journey_redo", on_click=_journey_redo_cb)
                     with cbtn2:
                         next_disabled = (total_steps <= 0) or (step_i >= total_steps - 1)
                         label = "Finish" if next_disabled else "Next step"
                         st.button(
                             label,
-                            use_container_width=True,
+                            width='stretch',
                             disabled=next_disabled,
                             key="journey_next",
                             on_click=_journey_next_cb,
@@ -3456,7 +3456,7 @@ if nav == "🧑‍🎓 Student":
                         st.session_state["canvas_key"] = int(st.session_state.get("canvas_key", 0) or 0) + 1
                         st.session_state["student_answer_text_single"] = ""
 
-                    st.button("Start New Attempt", use_container_width=True, key="new_attempt", on_click=_new_attempt_cb)
+                    st.button("Start New Attempt", width='stretch', key="new_attempt", on_click=_new_attempt_cb)
             else:
                 st.info("Submit an answer to receive feedback.")
 # ============================================================
@@ -3500,7 +3500,7 @@ elif nav == "🔒 Teacher Dashboard":
                     .assign(percent=lambda x: (100 * x["marks_awarded"] / x["max_marks"].replace(0, np.nan)).round(1))
                     .sort_values("percent", ascending=False)
                 )
-                st.dataframe(by_student, use_container_width=True)
+                st.dataframe(by_student, width='stretch')
 
                 st.write("### By topic (overall %)")
                 by_topic = (
@@ -3509,10 +3509,10 @@ elif nav == "🔒 Teacher Dashboard":
                     .assign(percent=lambda x: (100 * x["marks_awarded"] / x["max_marks"].replace(0, np.nan)).round(1))
                     .sort_values("percent", ascending=False)
                 )
-                st.dataframe(by_topic, use_container_width=True)
+                st.dataframe(by_topic, width='stretch')
 
                 st.write("### Recent attempts")
-                st.dataframe(df.head(50), use_container_width=True)
+                st.dataframe(df.head(50), width='stretch')
 
                 attempt_delete_open = bool(st.session_state.get("attempt_delete_picks")) or bool(
                     st.session_state.get("confirm_delete_attempt")
@@ -3573,7 +3573,7 @@ elif nav == "🔒 Teacher Dashboard":
                         if st.button(
                             "Delete selected attempts",
                             type="primary",
-                            use_container_width=True,
+                            width='stretch',
                             disabled=not (confirm_delete and attempt_picks),
                             key="delete_attempt_btn",
                             on_click=_request_attempt_delete,
@@ -3789,7 +3789,7 @@ else:
                                 st.markdown("**Question**")
                                 with st.container(border=True):
                                     if q_img is not None:
-                                        st.image(q_img, use_container_width=True)
+                                        st.image(q_img, width='stretch')
                                     if q_text:
                                         st.markdown(normalize_markdown_math(q_text))
                                     if (q_img is None) and (not q_text):
@@ -3799,7 +3799,7 @@ else:
                                 st.markdown("**Mark scheme (teacher only)**")
                                 with st.container(border=True):
                                     if ms_img is not None:
-                                        st.image(ms_img, use_container_width=True)
+                                        st.image(ms_img, width='stretch')
                                     if ms_text:
                                         st.markdown(normalize_markdown_math(ms_text))
                                     if (ms_img is None) and (not ms_text):
@@ -3827,7 +3827,7 @@ else:
                             if st.button(
                                 "Delete selected entries",
                                 type="primary",
-                                use_container_width=True,
+                                width='stretch',
                                 disabled=not (confirm_delete_q and delete_picks),
                                 key="delete_bank_entry_btn",
                             ):
@@ -3847,7 +3847,7 @@ else:
                         df_bank = load_question_bank_df(limit=50, include_inactive=False)
                         if not df_bank.empty:
                             show_cols = [c for c in ["created_at", "source", "assignment_name", "question_label", "question_type", "max_marks", "id"] if c in df_bank.columns]
-                            st.dataframe(df_bank[show_cols], use_container_width=True)
+                            st.dataframe(df_bank[show_cols], width='stretch')
                         else:
                             st.info("No recent entries.")
             with tab_ai:
@@ -3886,9 +3886,9 @@ else:
                         assignment_name_ai = st.text_input("Assignment name for saving", value="AI Practice", key="gen_assignment")
 
                     with gen_c2:
-                        gen_clicked = st.button("Generate draft", type="primary", use_container_width=True, disabled=not AI_READY, key="gen_btn")
+                        gen_clicked = st.button("Generate draft", type="primary", width='stretch', disabled=not AI_READY, key="gen_btn")
 
-                        if st.button("Clear draft", use_container_width=True, key="clear_draft"):
+                        if st.button("Clear draft", width='stretch', key="clear_draft"):
                             st.session_state["ai_draft"] = None
                             st.rerun()
 
@@ -3960,7 +3960,7 @@ else:
 
                         with ed2:
                             st.caption("Mark scheme is confidential. Students never see it.")
-                            approve_clicked = st.button("Approve & Save to bank", type="primary", use_container_width=True, key="approve_save")
+                            approve_clicked = st.button("Approve & Save to bank", type="primary", width='stretch', key="approve_save")
                             st.caption("Tip: use Markdown and LaTeX freely.")
 
                         d_qtext = st.text_area("Question text (student will see this)", value=d.get("question_text", ""), height=180, key="draft_qtext")
@@ -4055,12 +4055,12 @@ else:
                         gen_j = st.button(
                             "Generate journey draft",
                             type="primary",
-                            use_container_width=True,
+                            width='stretch',
                             disabled=not AI_READY,
                             key="jour_gen_btn",
                         )
 
-                        if st.button("Clear journey draft", use_container_width=True, key="jour_clear_btn"):
+                        if st.button("Clear journey draft", width='stretch', key="jour_clear_btn"):
                             st.session_state["journey_draft"] = None
                             st.session_state["journey_gen_error_details"] = None
                             st.session_state["journey_show_error"] = False
@@ -4123,7 +4123,7 @@ else:
 
                         # Optional: reveal raw error details if the user wants them
                         if st.session_state.get("journey_gen_error_details"):
-                            if st.button("Explain error", key="jour_explain_error", use_container_width=True):
+                            if st.button("Explain error", key="jour_explain_error", width='stretch'):
                                 st.session_state["journey_show_error"] = True
 
                         if st.session_state.get("journey_show_error") and st.session_state.get("journey_gen_error_details"):
@@ -4145,7 +4145,7 @@ else:
                             d_tags_str = st.text_input("Tags (comma separated)", value=", ".join(d.get("tags", [])), key="jour_draft_tags")
 
                         with hd2:
-                            save_j = st.button("Save Topic Journey to bank", type="primary", use_container_width=True, key="jour_save_btn")
+                            save_j = st.button("Save Topic Journey to bank", type="primary", width='stretch', key="jour_save_btn")
                             st.caption("Saved as a single Question Bank entry (type=journey).")
 
                         plan_md = st.text_area("Journey plan (Markdown)", value=journey.get("plan_markdown", ""), height=140, key="jour_plan_md")
