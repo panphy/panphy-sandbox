@@ -1289,6 +1289,26 @@ def render_md_box(title: str, md_text: str, caption: str = "", empty_text: str =
     if caption:
         st.caption(caption)
 
+
+def render_height_controls(label: str, state_key: str, default: int, min_h: int, max_h: int, step: int = 40) -> int:
+    if state_key not in st.session_state:
+        st.session_state[state_key] = int(default)
+    st.session_state[state_key] = clamp_int(st.session_state[state_key], min_h, max_h, default=default)
+    cols = st.columns([1, 1, 4])
+    with cols[0]:
+        if st.button("−", key=f"{state_key}_dec", help=f"Reduce {label} height"):
+            st.session_state[state_key] = clamp_int(
+                st.session_state[state_key] - step, min_h, max_h, default=default
+            )
+    with cols[1]:
+        if st.button("＋", key=f"{state_key}_inc", help=f"Increase {label} height"):
+            st.session_state[state_key] = clamp_int(
+                st.session_state[state_key] + step, min_h, max_h, default=default
+            )
+    with cols[2]:
+        st.caption(f"{label} height: {st.session_state[state_key]} px")
+    return int(st.session_state[state_key])
+
 # ============================================================
 # PROGRESS INDICATORS
 # ============================================================
@@ -1374,7 +1394,7 @@ def _run_ai_with_progress(task_fn, ctx: dict, typical_range: str, est_seconds: f
 }}
 .pp-progress-fill {{
   height: 100%;
-  background: rgba(0,0,0,0.25);
+  background: #2f6df6;
   border-radius: 999px;
   transition: width 0.35s ease;
 }}
@@ -1410,7 +1430,7 @@ def _run_ai_with_progress(task_fn, ctx: dict, typical_range: str, est_seconds: f
             return 100
         if est_seconds <= 0:
             return 0
-        return min(99, max(0, int((elapsed_s / est_seconds) * 100)))
+        return min(90, max(0, int((elapsed_s / est_seconds) * 100)))
 
     _render_overlay("AI is working. Please wait.", 0)
 
@@ -2366,9 +2386,17 @@ if nav == "🧑‍🎓 Student":
 
             if str(mode_single).startswith("⌨️"):
                 st.markdown("**Answer (typed)**")
+                text_height_single = render_height_controls(
+                    "Text box",
+                    "text_height_single",
+                    default=200,
+                    min_h=120,
+                    max_h=600,
+                    step=40,
+                )
                 answer_single = st.text_area(
                     "Type your working:",
-                    height=200,
+                    height=text_height_single,
                     placeholder="Enter your answer here...",
                     key="student_answer_text_single",
                 )
@@ -2459,12 +2487,20 @@ if nav == "🧑‍🎓 Student":
 
                     stroke_width = 2 if tool == "Pen" else 30
                     stroke_color = "#000000" if tool == "Pen" else CANVAS_BG_HEX
+                    canvas_height_single = render_height_controls(
+                        "Canvas",
+                        "canvas_height_single",
+                        default=420,
+                        min_h=260,
+                        max_h=900,
+                        step=60,
+                    )
 
                     canvas_value = stylus_canvas(
                         stroke_width=stroke_width,
                         stroke_color=stroke_color,
                         background_color=CANVAS_BG_HEX,
-                        height=420,
+                        height=canvas_height_single,
                         width=None,
                         storage_key=f"panphy_canvas_h_{SUBJECT_SITE}_single",
                         initial_data_url=st.session_state.get("last_canvas_data_url_single"),
@@ -2495,6 +2531,14 @@ if nav == "🧑‍🎓 Student":
                         st.rerun()
                     stroke_width = 2 if tool == "Pen" else 30
                     stroke_color = "#000000" if tool == "Pen" else CANVAS_BG_HEX
+                    canvas_height_single = render_height_controls(
+                        "Canvas",
+                        "canvas_height_single",
+                        default=420,
+                        min_h=260,
+                        max_h=900,
+                        step=60,
+                    )
                     try:
                         from streamlit_drawable_canvas import st_canvas as _st_canvas
                     except Exception:
@@ -2507,7 +2551,7 @@ if nav == "🧑‍🎓 Student":
                             stroke_width=stroke_width,
                             stroke_color=stroke_color,
                             background_color=CANVAS_BG_HEX,
-                            height=400,
+                            height=canvas_height_single,
                             width=600,
                             drawing_mode="freedraw",
                             key=f"canvas_single_{st.session_state['canvas_key']}",
@@ -2703,9 +2747,17 @@ if nav == "🧑‍🎓 Student":
 
                     if str(mode_journey).startswith("⌨️"):
                         st.markdown("**Answer (typed)**")
+                        text_height_journey = render_height_controls(
+                            "Text box",
+                            "text_height_journey",
+                            default=200,
+                            min_h=120,
+                            max_h=600,
+                            step=40,
+                        )
                         answer_journey = st.text_area(
                             "Type your working:",
-                            height=200,
+                            height=text_height_journey,
                             placeholder="Enter your answer here...",
                             key="student_answer_text_journey",
                         )
@@ -2802,15 +2854,23 @@ if nav == "🧑‍🎓 Student":
 
                             stroke_width = 2 if tool == "Pen" else 30
                             stroke_color = "#000000" if tool == "Pen" else CANVAS_BG_HEX
+                            canvas_height_journey = render_height_controls(
+                                "Canvas",
+                                "canvas_height_journey",
+                                default=420,
+                                min_h=260,
+                                max_h=900,
+                                step=60,
+                            )
 
                             canvas_value = stylus_canvas(
                                 stroke_width=stroke_width,
                                 stroke_color=stroke_color,
                                 background_color=CANVAS_BG_HEX,
-                        height=420,
-                        width=None,
-                        storage_key=f"panphy_canvas_h_{SUBJECT_SITE}_journey",
-                        initial_data_url=st.session_state.get("last_canvas_data_url_journey"),
+                                height=canvas_height_journey,
+                                width=None,
+                                storage_key=f"panphy_canvas_h_{SUBJECT_SITE}_journey",
+                                initial_data_url=st.session_state.get("last_canvas_data_url_journey"),
                                 pen_only=bool(st.session_state.get("stylus_only_enabled", True)),
                                 tool=("pen" if tool == "Pen" else "eraser"),
                                 command=cmd,
@@ -2837,6 +2897,14 @@ if nav == "🧑‍🎓 Student":
                                 st.rerun()
                             stroke_width = 2 if tool == "Pen" else 30
                             stroke_color = "#000000" if tool == "Pen" else CANVAS_BG_HEX
+                            canvas_height_journey = render_height_controls(
+                                "Canvas",
+                                "canvas_height_journey",
+                                default=420,
+                                min_h=260,
+                                max_h=900,
+                                step=60,
+                            )
                             try:
                                 from streamlit_drawable_canvas import st_canvas as _st_canvas
                             except Exception:
@@ -2849,7 +2917,7 @@ if nav == "🧑‍🎓 Student":
                                     stroke_width=stroke_width,
                                     stroke_color=stroke_color,
                                     background_color=CANVAS_BG_HEX,
-                                    height=400,
+                                    height=canvas_height_journey,
                                     width=600,
                                     drawing_mode="freedraw",
                                     key=f"canvas_journey_{st.session_state['canvas_key']}",
