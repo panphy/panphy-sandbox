@@ -1868,7 +1868,10 @@ def _get_equation_whitelist(eq_pack: dict) -> set:
         if isinstance(eq, dict):
             latex = str(eq.get("latex", "") or "").strip()
             if latex:
-                whitelist.add(_normalize_equation_text(latex))
+                normalized = _normalize_equation_text(latex)
+                if normalized:
+                    whitelist.add(normalized)
+                    whitelist.update(_derive_equation_rearrangements(normalized))
     notes = eq_pack.get("notation_rules") or []
     for note in notes:
         for match in _get_equation_regexes()["plain_eq"].finditer(str(note or "")):
@@ -1893,6 +1896,76 @@ def _get_equation_regexes() -> Dict[str, re.Pattern]:
         "latex_bracket": latex_bracket,
         "plain_eq": plain_eq,
     }
+
+
+def _extract_simple_fraction(expr: str) -> Optional[Tuple[str, str]]:
+    if not expr or not expr.startswith("\\frac{"):
+        return None
+    idx = len("\\frac{")
+    depth = 1
+    numerator_chars: List[str] = []
+    while idx < len(expr) and depth > 0:
+        ch = expr[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                idx += 1
+                break
+        if depth > 0:
+            numerator_chars.append(ch)
+        idx += 1
+    if depth != 0:
+        return None
+    if idx >= len(expr) or expr[idx] != "{":
+        return None
+    idx += 1
+    depth = 1
+    denominator_chars: List[str] = []
+    while idx < len(expr) and depth > 0:
+        ch = expr[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                idx += 1
+                break
+        if depth > 0:
+            denominator_chars.append(ch)
+        idx += 1
+    if depth != 0 or idx != len(expr):
+        return None
+    numerator = "".join(numerator_chars).strip()
+    denominator = "".join(denominator_chars).strip()
+    if not numerator or not denominator:
+        return None
+    return numerator, denominator
+
+
+def _derive_equation_rearrangements(eq: str) -> set:
+    if not eq or "=" not in eq:
+        return set()
+    lhs, rhs = eq.split("=", 1)
+    lhs = lhs.strip()
+    rhs = rhs.strip()
+    if not lhs or not rhs:
+        return set()
+    rearrangements: set = set()
+    rhs_frac = _extract_simple_fraction(rhs)
+    if rhs_frac:
+        numerator, denominator = rhs_frac
+        rearrangements.add(f"{numerator}={lhs}{denominator}")
+        rearrangements.add(f"{numerator}={lhs}*{denominator}")
+        rearrangements.add(f"{denominator}={numerator}/{lhs}")
+    lhs_frac = _extract_simple_fraction(lhs)
+    if lhs_frac:
+        numerator, denominator = lhs_frac
+        rearrangements.add(f"{numerator}={rhs}{denominator}")
+        rearrangements.add(f"{numerator}={rhs}*{denominator}")
+        rearrangements.add(f"{denominator}={numerator}/{rhs}")
+    return {r for r in rearrangements if r}
 
 
 def _normalize_equation_text(eq: str) -> str:
