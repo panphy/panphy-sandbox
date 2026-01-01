@@ -113,6 +113,7 @@
   // Undo history: store data URLs after each stroke end
   let history = [];
   let lastCommandNonce = -1;
+  let lastArgsHeight = null;
 
   // Current logical size in CSS pixels
   let currentW = 0;
@@ -357,12 +358,14 @@
     if (args.resizable) resizable.classList.remove("no-resize");
     else resizable.classList.add("no-resize");
 
-    // Set initial height (prefer persisted user choice)
+    // Set initial height (prefer persisted user choice) or apply when args.height changes
     const persisted = tryLoadPersistedHeight();
     const baseH = Number(args.height) || 420;
     const h = clamp(persisted ?? baseH, Number(args.min_height) || 220, Number(args.max_height) || 1200);
-    if (!currentH) {
+    if (!currentH || Number(args.height) !== lastArgsHeight) {
       resizable.style.height = h + "px";
+      lastArgsHeight = Number(args.height);
+      tryPersistHeight(h);
     }
 
     // Ensure we are sized correctly (preserve drawing if resizing)
