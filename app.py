@@ -703,19 +703,25 @@ def ensure_rate_limits_table():
         LOGGER.error("Rate limits table ensure failed", extra={"ctx": {"component": "db", "error": type(e).__name__}})
 
 
+@st.cache_resource
+def _ensure_question_bank_table_cached(_fp: str) -> None:
+    eng = get_db_engine()
+    if eng is None:
+        raise RuntimeError("Database engine not configured.")
+    with eng.begin() as conn:
+        _exec_sql_many(conn, QUESTION_BANK_DDL)
+        _exec_sql_many(conn, QUESTION_BANK_ALTER_DDL)
+    LOGGER.info("Question bank table ready", extra={"ctx": {"component": "db", "table": "question_bank_v1"}})
+
+
 def ensure_question_bank_table():
     if st.session_state.get("bank_table_ready", False):
         return
-    eng = get_db_engine()
-    if eng is None:
-        return
+    fp = (st.secrets.get("DATABASE_URL", "") or "")[:40]
     try:
-        with eng.begin() as conn:
-            _exec_sql_many(conn, QUESTION_BANK_DDL)
-            _exec_sql_many(conn, QUESTION_BANK_ALTER_DDL)
+        _ensure_question_bank_table_cached(fp)
         st.session_state["bank_table_ready"] = True
         st.session_state["db_last_error"] = ""
-        LOGGER.info("Question bank table ready", extra={"ctx": {"component": "db", "table": "question_bank_v1"}})
     except Exception as e:
         st.session_state["db_last_error"] = f"Question Bank Table Error: {type(e).__name__}: {e}"
         st.session_state["bank_table_ready"] = False
