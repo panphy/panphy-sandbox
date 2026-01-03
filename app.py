@@ -2652,7 +2652,7 @@ st.markdown(
     <ul class="pp-hero-list">
       <li>AI practice questions tailored to topic and difficulty.</li>
       <li>Topic Journeys that guide students step-by-step.</li>
-      <li>Teacher uploads with instant feedback and marks.</li>
+      <li>Teacher-uploaded questions with instant feedback and marks.</li>
     </ul>
   </div>
   <div class="pp-hero-card">
