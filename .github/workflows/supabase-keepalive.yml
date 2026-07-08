@@ -1,0 +1,22 @@
+name: Supabase Keep-Alive
+
+# Queries the DB twice a week so the free-tier inactivity pause
+# (7 days without DB activity) never triggers. Fails loudly on
+# any non-200 so GitHub emails on breakage.
+
+on:
+  schedule:
+    - cron: '0 3 * * 1,4'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Query app_heartbeat_v1
+        env:
+          KEY: ${{ secrets.SUPABASE_ANON_KEY_SKILL_BUILDER }}
+        run: |
+          curl -sf "https://quvabaudrylulyvuqayu.supabase.co/rest/v1/app_heartbeat_v1?select=heartbeat_key&limit=1" \
+            -H "apikey: $KEY" \
+            -H "Authorization: Bearer $KEY"
