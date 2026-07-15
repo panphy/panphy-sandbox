@@ -1,22 +1,32 @@
 name: Supabase Keep-Alive
 
-# Queries the DB twice a week so the free-tier inactivity pause
-# (7 days without DB activity) never triggers. Fails loudly on
-# any non-200 so GitHub emails on breakage.
+# Supabase recommends a few user database requests each day for inactive
+# Free Plan projects. These external REST queries cover both projects.
 
 on:
   schedule:
-    - cron: '0 3 * * 1,4'
+    - cron: '23 1,9,17 * * *'
   workflow_dispatch:
 
 jobs:
   ping:
     runs-on: ubuntu-latest
+    timeout-minutes: 2
     steps:
-      - name: Query app_heartbeat_v1
+      - name: Query PanPhy Skill Builder
         env:
           KEY: ${{ secrets.SUPABASE_ANON_KEY_SKILL_BUILDER }}
         run: |
-          curl -sf "https://quvabaudrylulyvuqayu.supabase.co/rest/v1/app_heartbeat_v1?select=heartbeat_key&limit=1" \
+          curl --fail-with-body --silent --show-error \
+            "https://quvabaudrylulyvuqayu.supabase.co/rest/v1/question_bank_v2?select=id&limit=1" \
+            -H "apikey: $KEY" \
+            -H "Authorization: Bearer $KEY"
+
+      - name: Query PanPhy Games
+        env:
+          KEY: ${{ secrets.SUPABASE_ANON_KEY_GAMES }}
+        run: |
+          curl --fail-with-body --silent --show-error \
+            "https://ldkgodxalwuvkqygchns.supabase.co/rest/v1/dodge_leaderboard?select=id&limit=1" \
             -H "apikey: $KEY" \
             -H "Authorization: Bearer $KEY"
